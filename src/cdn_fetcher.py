@@ -12,6 +12,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 import config
+from src.database import db
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class CDNFetcher:
             
             response = self.session.get(
                 url,
-                timeout=config.REQUEST_TIMEOUT
+                timeout=(5.0, config.REQUEST_TIMEOUT)  # (connect, read)
             )
             
             # Обработка 404 ошибок

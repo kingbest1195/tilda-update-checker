@@ -1,24 +1,6 @@
-# HTTP запросы
 requests>=2.31.0
-
-# Парсинг HTML для Discovery Mode
-beautifulsoup4>=4.12.0
-
-# OpenAI API
 openai>=1.0.0
-
-# Планировщик задач
 apscheduler>=3.10.0
-
-# ORM для работы с SQLite
 sqlalchemy>=2.0.0
-
-# Управление переменными окружения
 python-dotenv>=1.0.0
-
-# Дополнительные утилиты
-pyyaml>=6.0.0
-
-# Сравнение версий (semver)
 packaging>=23.0
-

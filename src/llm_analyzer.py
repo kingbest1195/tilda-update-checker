@@ -92,7 +92,11 @@ class LLMAnalyzer:
             logger.warning("OPENAI_API_KEY не установлен! LLM анализ будет недоступен.")
             self.client = None
         else:
-            self.client = OpenAI(api_key=config.OPENAI_API_KEY)
+            self.client = OpenAI(
+                api_key=config.OPENAI_API_KEY,
+                timeout=60.0,
+                max_retries=2
+            )
     
     def analyze_change(self, change_info: Dict) -> Optional[Dict]:
         """

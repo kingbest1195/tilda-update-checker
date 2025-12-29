@@ -460,10 +460,40 @@ class TelegramNotifier:
         Returns:
             True если успешно отправлено
         """
-        # TODO: Реализовать при наличии python-telegram-bot
-        logger.warning("Telegram Bot API пока не реализован. Требуется установить python-telegram-bot")
-        logger.info(f"Сообщение для отправки:\n{message}")
-        return False
+        if not self.enabled:
+            logger.debug("Telegram отключен")
+            return False
+        
+        try:
+            import requests
+            
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            
+            payload = {
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True
+            }
+            
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('ok'):
+                logger.info(f"✅ Сообщение успешно отправлено в Telegram (chat_id: {self.chat_id})")
+                return True
+            else:
+                logger.error(f"❌ Telegram API вернул ошибку: {result.get('description', 'Unknown error')}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Непредвиденная ошибка при отправке в Telegram: {e}", exc_info=True)
+            return False
     
     def test_connection(self) -> bool:
         """
@@ -473,15 +503,43 @@ class TelegramNotifier:
             True если соединение работает
         """
         if not self.enabled:
-            logger.error("Telegram не настроен")
+            logger.error("❌ Telegram не настроен (отсутствует bot_token или chat_id)")
             return False
         
         try:
-            # TODO: Проверить подключение к Bot API
-            logger.info("Проверка подключения к Telegram...")
-            return True
+            import requests
+            
+            # Проверка токена бота
+            url = f"https://api.telegram.org/bot{self.bot_token}/getMe"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('ok'):
+                bot_info = result.get('result', {})
+                logger.info(f"✅ Бот подключен: @{bot_info.get('username', 'unknown')}")
+                logger.info(f"   Имя: {bot_info.get('first_name', 'N/A')}")
+                logger.info(f"   ID: {bot_info.get('id', 'N/A')}")
+                
+                # Проверка доступа к чату
+                test_message = f"🔌 Тестовое подключение Tilda Update Checker\nВремя: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                
+                if self._send_message(test_message):
+                    logger.info(f"✅ Chat ID {self.chat_id} доступен для отправки сообщений")
+                    return True
+                else:
+                    logger.error(f"❌ Не удалось отправить тестовое сообщение в chat_id: {self.chat_id}")
+                    return False
+            else:
+                logger.error(f"❌ Telegram API вернул ошибку: {result.get('description', 'Unknown error')}")
+                return False
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Ошибка HTTP при проверке подключения: {e}")
+            return False
         except Exception as e:
-            logger.error(f"Ошибка подключения к Telegram: {e}")
+            logger.error(f"❌ Ошибка проверки подключения к Telegram: {e}", exc_info=True)
             return False
 
 

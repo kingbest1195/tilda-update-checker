@@ -16,8 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Float,
 )
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, relationship, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 
 import config
 
@@ -243,7 +242,6 @@ class Database:
             
             # Создать фабрику сессий
             self.SessionLocal = sessionmaker(
-                autocommit=False,
                 autoflush=False,
                 bind=self.engine
             )
@@ -263,19 +261,13 @@ class Database:
     
     def get_tracked_files(self) -> List[TrackedFile]:
         """Получить список всех отслеживаемых файлов"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(TrackedFile).all()
-        finally:
-            session.close()
     
     def get_file_by_url(self, url: str) -> Optional[TrackedFile]:
         """Получить файл по URL"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(TrackedFile).filter(TrackedFile.url == url).first()
-        finally:
-            session.close()
     
     def save_file_state(self, url: str, file_type: str, content: str, 
                        content_hash: str, size: int, category: str = 'unknown',
@@ -436,23 +428,17 @@ class Database:
         Returns:
             Список анонсов
         """
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(Announcement).order_by(
                 Announcement.generated_at.desc()
             ).limit(limit).all()
-        finally:
-            session.close()
     
     def get_changes_without_announcements(self) -> List[Change]:
         """Получить изменения без анонсов"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(Change).filter(
                 ~Change.announcements.any()
             ).all()
-        finally:
-            session.close()
     
     def save_discovered_file(self, url: str, source_page: str, 
                            pattern_matched: str = None, 
@@ -500,13 +486,10 @@ class Database:
     
     def get_undiscovered_files(self) -> List[DiscoveredFile]:
         """Получить файлы, которые еще не добавлены в отслеживание"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(DiscoveredFile).filter(
                 DiscoveredFile.added_to_tracking == 0
             ).all()
-        finally:
-            session.close()
     
     def mark_discovered_as_tracked(self, discovered_id: int):
         """Отметить обнаруженный файл как добавленный в отслеживание"""
@@ -532,24 +515,18 @@ class Database:
     
     def get_active_tracked_files(self) -> List[TrackedFile]:
         """Получить только активные отслеживаемые файлы"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(TrackedFile).filter(
                 TrackedFile.is_active == 1
             ).all()
-        finally:
-            session.close()
     
     def get_file_by_base_name(self, base_name: str) -> Optional[TrackedFile]:
         """Получить активный файл по базовому имени"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(TrackedFile).filter(
                 TrackedFile.base_name == base_name,
                 TrackedFile.is_active == 1
             ).first()
-        finally:
-            session.close()
     
     def increment_404_count(self, url: str):
         """Увеличить счетчик 404 ошибок для файла"""
@@ -592,13 +569,10 @@ class Database:
     
     def get_files_with_404_errors(self, min_count: int = 3) -> List[TrackedFile]:
         """Получить файлы с критическим количеством 404 ошибок"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(TrackedFile).filter(
                 TrackedFile.consecutive_404_count >= min_count
             ).all()
-        finally:
-            session.close()
     
     # FileVersion методы
     
@@ -638,24 +612,18 @@ class Database:
     
     def get_versions_by_base_name(self, base_name: str) -> List[FileVersion]:
         """Получить все версии файла по базовому имени"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(FileVersion).filter(
                 FileVersion.base_name == base_name
             ).order_by(FileVersion.archived_at.desc()).all()
-        finally:
-            session.close()
     
     def get_version_by_exact(self, base_name: str, version: str) -> Optional[FileVersion]:
         """Получить конкретную версию файла"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(FileVersion).filter(
                 FileVersion.base_name == base_name,
                 FileVersion.version == version
             ).first()
-        finally:
-            session.close()
     
     # VersionAlert методы
     
@@ -717,23 +685,17 @@ class Database:
     
     def get_pending_alerts(self) -> List[VersionAlert]:
         """Получить алерты в ожидании миграции"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(VersionAlert).filter(
                 VersionAlert.migration_status == 'pending'
             ).all()
-        finally:
-            session.close()
     
     def get_recent_version_alerts(self, limit: int = 10) -> List[VersionAlert]:
         """Получить последние алерты о версиях"""
-        session = self.get_session()
-        try:
+        with self.SessionLocal() as session:
             return session.query(VersionAlert).order_by(
                 VersionAlert.discovered_at.desc()
             ).limit(limit).all()
-        finally:
-            session.close()
     
     def mark_alert_telegram_sent(self, alert_id: int):
         """Отметить, что Telegram уведомление отправлено"""
