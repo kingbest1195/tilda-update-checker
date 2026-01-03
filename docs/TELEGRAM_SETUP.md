@@ -389,3 +389,5 @@ TELEGRAM_DISCOVERY_CHAT_ID=-111222333
 
 **Вопросы?** Проверьте раздел [Troubleshooting](#troubleshooting) или откройте issue на GitHub.
 
+
+

@@ -1,0 +1,119 @@
+version: "3.8"
+
+# ============================================
+# Tilda Update Checker - Docker Compose
+# ============================================
+# Для локального тестирования и разработки
+# На production используйте Dokploy Web UI
+# ============================================
+
+services:
+  tilda-checker:
+    # Имя контейнера
+    container_name: tilda-update-checker
+
+    # Сборка из локального Dockerfile
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Или использовать готовый образ (после публикации в registry)
+    # image: your-registry/tilda-update-checker:latest
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Переменные окружения (из .env файла)
+    env_file:
+      - .env
+
+    # Дополнительные переменные окружения
+    environment:
+      # Python настройки
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+
+      # Timezone
+      - TZ=Europe/Moscow
+
+      # Database path (относительный путь внутри контейнера)
+      - DATABASE_PATH=data/tilda_checker.db
+
+      # Log settings
+      - LOG_FILE=logs/tilda_checker.log
+      - LOG_LEVEL=INFO
+
+    # Volumes для персистентных данных
+    volumes:
+      # База данных - ОБЯЗАТЕЛЬНО для сохранения данных
+      - ./data:/app/data
+
+      # Логи - ОБЯЗАТЕЛЬНО для доступа к логам с хоста
+      - ./logs:/app/logs
+
+      # Опционально: монтировать код для разработки (hot-reload)
+      # Раскомментируйте для development режима
+      # - ./src:/app/src
+      # - ./main.py:/app/main.py
+      # - ./config.py:/app/config.py
+
+    # Healthcheck
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys; from pathlib import Path; sys.exit(0 if Path('data/tilda_checker.db').exists() else 1)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Ограничения ресурсов (опционально)
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+
+    # Logging driver
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # Labels для организации
+    labels:
+      - "com.tilda.checker.version=1.0.0"
+      - "com.tilda.checker.description=Tilda CDN Update Checker"
+# ============================================
+# Volumes (named volumes - опционально)
+# ============================================
+# Если хотите использовать Docker managed volumes
+# вместо bind mounts, раскомментируйте:
+#
+# volumes:
+#   tilda-data:
+#     driver: local
+#   tilda-logs:
+#     driver: local
+#
+# И замените в секции volumes выше:
+#   - tilda-data:/app/data
+#   - tilda-logs:/app/logs
+
+# ============================================
+# Networks (опционально)
+# ============================================
+# Для подключения к другим сервисам
+# networks:
+#   default:
+#     name: tilda-network
+#     driver: bridge
+

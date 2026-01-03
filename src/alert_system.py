@@ -436,3 +436,5 @@ class AlertSystem:
 # Глобальный экземпляр системы алертов
 alert_system = AlertSystem()
 
+
+

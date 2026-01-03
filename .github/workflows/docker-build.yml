@@ -1,0 +1,89 @@
+name: Docker Build & Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: tilda-update-checker:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Test Docker image
+        run: |
+          # Создать временные директории
+          mkdir -p test-data test-logs
+          
+          # Создать минимальный .env для теста
+          cat > .env.test << EOF
+          PYTHONUNBUFFERED=1
+          DATABASE_PATH=data/tilda_checker.db
+          LOG_FILE=logs/tilda_checker.log
+          LOG_LEVEL=INFO
+          TILDA_CHECK_INTERVAL=3600
+          EOF
+          
+          # Запустить контейнер в режиме инициализации БД
+          docker run --rm \
+            -v $(pwd)/test-data:/app/data \
+            -v $(pwd)/test-logs:/app/logs \
+            --env-file .env.test \
+            tilda-update-checker:test \
+            bash -c "python -c 'from src.database import db; db.init_db(); print(\"DB initialized\")'"
+          
+          # Проверить, что БД создана
+          if [ -f "test-data/tilda_checker.db" ]; then
+            echo "✅ Database successfully created"
+          else
+            echo "❌ Database creation failed"
+            exit 1
+          fi
+          
+          # Cleanup
+          rm -rf test-data test-logs .env.test
+      
+      - name: Check Docker image size
+        run: |
+          SIZE=$(docker image inspect tilda-update-checker:test --format='{{.Size}}' | awk '{print $1/1024/1024}')
+          echo "Docker image size: ${SIZE} MB"
+          
+          # Предупредить если образ больше 300MB
+          if [ $(echo "$SIZE > 300" | bc) -eq 1 ]; then
+            echo "⚠️ Warning: Docker image is larger than 300MB"
+          else
+            echo "✅ Docker image size is acceptable"
+          fi
+
+  lint-dockerfile:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Lint Dockerfile with Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          ignore: DL3008,DL3013
+
+
+

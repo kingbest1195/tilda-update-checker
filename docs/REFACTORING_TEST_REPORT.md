@@ -441,3 +441,5 @@ from src.database import db
 **Подготовил:** AI Assistant  
 **Основание:** DEPENDENCIES_ANALYSIS_REPORT.md
 
+
+

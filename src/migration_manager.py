@@ -506,3 +506,5 @@ class MigrationManager:
 # Глобальный экземпляр менеджера миграций
 manager = MigrationManager()
 
+
+

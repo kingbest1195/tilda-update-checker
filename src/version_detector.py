@@ -389,3 +389,5 @@ class VersionDetector:
 # Глобальный экземпляр детектора
 detector = VersionDetector()
 
+
+
