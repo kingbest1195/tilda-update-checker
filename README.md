@@ -85,6 +85,42 @@ docker-compose up -d
 - ✅ Web UI для мониторинга
 - ✅ Откат к предыдущей версии за 10 секунд
 
+### 🔐 Backup и восстановление
+
+**Ручной backup базы данных:**
+
+```bash
+# Локально
+cp data/tilda_checker.db backup_$(date +%Y%m%d).db
+
+# В Docker контейнере
+docker cp tilda-update-checker:/app/data/tilda_checker.db ./backup.db
+```
+
+**Восстановление из backup:**
+
+```bash
+# Остановить приложение
+docker stop tilda-update-checker
+
+# Восстановить БД
+docker cp backup.db tilda-update-checker:/app/data/tilda_checker.db
+
+# Запустить приложение
+docker start tilda-update-checker
+```
+
+**Автоматический backup:**
+
+Настройте cron job для регулярного backup:
+
+```bash
+# Backup каждый день в 3:00 AM
+0 3 * * * docker cp tilda-update-checker:/app/data/tilda_checker.db /backups/tilda_$(date +\%Y\%m\%d).db
+```
+
+📖 Подробнее см. [DEPLOYMENT.md](DEPLOYMENT.md#backup-данных)
+
 ---
 
 ## 🛠 Использование

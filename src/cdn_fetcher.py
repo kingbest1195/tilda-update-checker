@@ -172,12 +172,21 @@ class CDNFetcher:
             
             logger.debug(f"Успешно скачано: {url} ({size} байт)")
             return content, size
-            
+
+        except requests.exceptions.Timeout:
+            logger.error(f"⏱ Timeout при загрузке {url}")
+            return None
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"🌐 HTTP ошибка {e.response.status_code}: {url}")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"🔌 Ошибка соединения при загрузке {url}")
+            return None
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ошибка при скачивании {url}: {e}")
+            logger.error(f"🌐 Ошибка сети: {url} - {e}")
             return None
         except Exception as e:
-            logger.error(f"Неожиданная ошибка при скачивании {url}: {e}", exc_info=True)
+            logger.error(f"💥 Неожиданная ошибка при скачивании {url}: {e}", exc_info=True)
             return None
     
     def calculate_hash(self, content: str) -> str:
@@ -313,12 +322,16 @@ class CDNFetcher:
                     tf.version = parsed['version']
                     tf.is_active = 1
                     session.commit()
+            except Exception as db_error:
+                session.rollback()
+                logger.error(f"Ошибка при обновлении метаданных файла: {db_error}", exc_info=True)
+                raise
             finally:
                 session.close()
-            
+
             logger.info(f"✅ Файл добавлен в мониторинг: {url}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Ошибка при добавлении файла в мониторинг: {e}", exc_info=True)
             return False

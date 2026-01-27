@@ -127,15 +127,12 @@ class MigrationManager:
             )
             
             # Деактивация старой версии в TrackedFile
-            session = db.get_session()
-            try:
+            with db.get_session() as session:
                 tf = session.query(TrackedFile).filter(TrackedFile.id == tracked_file.id).first()
                 if tf:
                     tf.is_active = 0
                     session.commit()
                     logger.info(f"✅ Старая версия архивирована: {tracked_file.base_name} v{tracked_file.version}")
-            finally:
-                session.close()
             
             return file_version
             
@@ -174,16 +171,13 @@ class MigrationManager:
             )
             
             # Обновление base_name и version
-            session = db.get_session()
-            try:
+            with db.get_session() as session:
                 tf = session.query(TrackedFile).filter(TrackedFile.id == tracked_file.id).first()
                 if tf:
                     tf.base_name = version_info['base_name']
                     tf.version = version_info['new_version']
                     tf.is_active = 1
                     session.commit()
-            finally:
-                session.close()
             
             logger.info(
                 f"✅ Новая версия активирована: {version_info['base_name']} "
@@ -451,15 +445,12 @@ class MigrationManager:
         """Попытка автоматического отката при ошибке миграции"""
         try:
             logger.warning("⚠️ Попытка автоматического отката...")
-            session = db.get_session()
-            try:
+            with db.get_session() as session:
                 tf = session.query(TrackedFile).filter(TrackedFile.id == old_tracked_file.id).first()
                 if tf:
                     tf.is_active = 1
                     session.commit()
                     logger.info("✅ Откат выполнен: старая версия восстановлена")
-            finally:
-                session.close()
         except Exception as e:
             logger.error(f"❌ Ошибка при автоматическом откате: {e}")
     

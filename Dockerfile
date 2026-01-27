@@ -49,6 +49,9 @@ COPY --from=builder /install /usr/local
 # Копировать файлы приложения
 COPY --chown=tilda:tilda . .
 
+# Копировать healthcheck скрипт
+COPY --chown=tilda:tilda healthcheck.py /app/healthcheck.py
+
 # Копировать и сделать исполняемым entrypoint скрипт
 COPY --chown=tilda:tilda entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
@@ -68,7 +71,7 @@ VOLUME ["/app/data", "/app/logs"]
 
 # Healthcheck для мониторинга
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD python -c "import sys; from pathlib import Path; sys.exit(0 if Path('data/tilda_checker.db').exists() else 1)" || exit 1
+    CMD python /app/healthcheck.py
 
 # Entrypoint
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -77,5 +77,6 @@ docs/**/*.md
 # НО сохранить важные .md файлы в корне
 !README.md
 !DEPLOYMENT.md
+!CLAUDE.md
 !DOCKER_QUICKSTART.md
 !env.example

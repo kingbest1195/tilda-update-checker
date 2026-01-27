@@ -3,6 +3,8 @@ Tilda Update Checker - главный модуль приложения
 """
 import argparse
 import logging
+import signal
+import atexit
 import sys
 from pathlib import Path
 
@@ -55,6 +57,20 @@ def setup_logging():
 
 
 logger = setup_logging()
+
+
+def shutdown_handler(scheduler, signum=None, frame=None):
+    """Обработчик graceful shutdown"""
+    logger.info("🛑 Получен сигнал завершения. Graceful shutdown...")
+    try:
+        if scheduler and scheduler.running:
+            scheduler.shutdown(wait=True)
+            logger.info("✅ Scheduler остановлен корректно")
+    except Exception as e:
+        logger.error(f"Ошибка при остановке scheduler: {e}")
+    finally:
+        logger.info("👋 Приложение остановлено")
+        sys.exit(0)
 
 
 def check_and_analyze():
@@ -201,7 +217,12 @@ def run_daemon():
     
     try:
         scheduler = BlockingScheduler()
-        
+
+        # Зарегистрировать обработчики сигналов для graceful shutdown
+        signal.signal(signal.SIGTERM, lambda s, f: shutdown_handler(scheduler, s, f))
+        signal.signal(signal.SIGINT, lambda s, f: shutdown_handler(scheduler, s, f))
+        atexit.register(lambda: shutdown_handler(scheduler))
+
         # Задача 1: Основная проверка изменений (каждый час)
         interval_hours = config.TILDA_CHECK_INTERVAL // 3600
         scheduler.add_job(

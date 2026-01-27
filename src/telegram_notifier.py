@@ -27,6 +27,13 @@ CATEGORY_EMOJI = {
 }
 
 
+def sanitize_url_for_logging(url: str) -> str:
+    """Удалить токены из URL перед логированием"""
+    import re
+    # Заменить bot<TOKEN>/method на bot***HIDDEN***/method
+    return re.sub(r'bot\d+:[A-Za-z0-9_-]+/', 'bot***HIDDEN***/', url)
+
+
 class TelegramNotifier:
     """Класс для отправки уведомлений в Telegram"""
     
@@ -466,16 +473,19 @@ class TelegramNotifier:
         
         try:
             import requests
-            
+
             url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            
+
+            # Логировать с санитизацией токена
+            logger.debug(f"Отправка POST запроса: {sanitize_url_for_logging(url)}")
+
             payload = {
                 "chat_id": self.chat_id,
                 "text": message,
                 "parse_mode": parse_mode,
                 "disable_web_page_preview": True
             }
-            
+
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
             
@@ -489,10 +499,11 @@ class TelegramNotifier:
                 return False
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {e}")
+            # Не логировать полный URL с токеном в ошибках
+            logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {type(e).__name__}")
             return False
         except Exception as e:
-            logger.error(f"❌ Непредвиденная ошибка при отправке в Telegram: {e}", exc_info=True)
+            logger.error(f"❌ Непредвиденная ошибка при отправке в Telegram: {type(e).__name__}", exc_info=False)
             return False
     
     def test_connection(self) -> bool:

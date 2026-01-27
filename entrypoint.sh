@@ -1,6 +1,19 @@
 #!/bin/bash
 set -e
 
+# Обработчик graceful shutdown
+shutdown() {
+    echo "[INFO] Получен сигнал завершения, останавливаем приложение..."
+    # Отправить SIGTERM в Python процесс
+    kill -SIGTERM $APP_PID 2>/dev/null || true
+    wait $APP_PID
+    echo "[INFO] ✓ Приложение остановлено"
+    exit 0
+}
+
+# Зарегистрировать обработчики
+trap shutdown SIGTERM SIGINT
+
 # ============================================
 # Tilda Update Checker - Entrypoint Script
 # ============================================
@@ -142,8 +155,10 @@ log_info "Запуск приложения с аргументами: $@"
 echo "============================================"
 echo ""
 
-# Передать все аргументы в main.py
-exec python /app/main.py "$@"
+# Запустить приложение в фоне и ждать (для graceful shutdown)
+python /app/main.py "$@" &
+APP_PID=$!
+wait $APP_PID
 
 
 

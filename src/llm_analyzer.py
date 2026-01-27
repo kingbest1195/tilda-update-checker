@@ -3,6 +3,8 @@
 """
 import logging
 import json
+import time
+from threading import Lock
 from typing import Dict, Optional
 
 from openai import OpenAI
@@ -11,6 +13,11 @@ from openai import OpenAIError
 import config
 
 logger = logging.getLogger(__name__)
+
+# Rate limiting для OpenAI API
+_last_api_call_time = 0
+_rate_limit_lock = Lock()
+MIN_API_CALL_INTERVAL = 1.0  # секунда между запросами
 
 
 # Контексты для разных категорий файлов
@@ -97,7 +104,19 @@ class LLMAnalyzer:
                 timeout=60.0,
                 max_retries=2
             )
-    
+
+    def _wait_for_rate_limit(self):
+        """Применить rate limiting для OpenAI API"""
+        global _last_api_call_time
+        with _rate_limit_lock:
+            current_time = time.time()
+            time_since_last_call = current_time - _last_api_call_time
+            if time_since_last_call < MIN_API_CALL_INTERVAL:
+                sleep_time = MIN_API_CALL_INTERVAL - time_since_last_call
+                logger.debug(f"⏱ Rate limiting: ожидание {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+            _last_api_call_time = time.time()
+
     def analyze_change(self, change_info: Dict) -> Optional[Dict]:
         """
         Проанализировать изменение через LLM
@@ -121,7 +140,10 @@ class LLMAnalyzer:
             user_prompt = self._create_analysis_prompt(change_info)
             
             logger.info(f"Отправка запроса в OpenAI для анализа: {change_info['url']}")
-            
+
+            # Применить rate limiting
+            self._wait_for_rate_limit()
+
             # Отправить запрос к OpenAI
             response = self.client.chat.completions.create(
                 model=config.OPENAI_MODEL,
