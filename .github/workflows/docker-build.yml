@@ -29,28 +29,30 @@ jobs:
           cache-to: type=gha,mode=max
       
       - name: Test Docker image
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           # Создать временные директории
           mkdir -p test-data test-logs
-          
-          # Создать минимальный .env для теста
-          cat > .env.test << EOF
-          PYTHONUNBUFFERED=1
-          DATABASE_PATH=data/tilda_checker.db
-          LOG_FILE=logs/tilda_checker.log
-          LOG_LEVEL=INFO
-          TILDA_CHECK_INTERVAL=3600
-          EOF
-          
-          # Запустить контейнер в режиме инициализации БД
+
+          # Запустить контейнер с флагом --once (одна проверка)
+          # Entrypoint автоматически инициализирует БД
           docker run --rm \
             --user root \
             -v $(pwd)/test-data:/app/data \
             -v $(pwd)/test-logs:/app/logs \
-            --env-file .env.test \
+            -e PYTHONUNBUFFERED=1 \
+            -e DATABASE_PATH=data/tilda_checker.db \
+            -e LOG_FILE=logs/tilda_checker.log \
+            -e LOG_LEVEL=INFO \
+            -e OPENAI_API_KEY="${OPENAI_API_KEY}" \
+            -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" \
+            -e TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID}" \
             tilda-update-checker:test \
-            bash -c "python -c 'from src.database import db; db.init_db(); print(\"DB initialized\")'"
-          
+            --once
+
           # Проверить, что БД создана
           if [ -f "test-data/tilda_checker.db" ]; then
             echo "✅ Database successfully created"
@@ -58,9 +60,16 @@ jobs:
             echo "❌ Database creation failed"
             exit 1
           fi
-          
+
+          # Проверить, что логи созданы
+          if [ -f "test-logs/tilda_checker.log" ]; then
+            echo "✅ Logs successfully created"
+          else
+            echo "⚠️  Logs not created (might be empty)"
+          fi
+
           # Cleanup
-          rm -rf test-data test-logs .env.test
+          rm -rf test-data test-logs
       
       - name: Check Docker image size
         run: |
