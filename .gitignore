@@ -38,6 +38,7 @@ env/
 # Environment variables
 .env
 .env.local
+.env.telegram
 .env.*.local
 
 # Database

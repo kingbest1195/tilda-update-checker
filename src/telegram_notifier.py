@@ -36,39 +36,53 @@ def sanitize_url_for_logging(url: str) -> str:
 
 class TelegramNotifier:
     """Класс для отправки уведомлений в Telegram"""
-    
-    def __init__(self, bot_token: str = None, chat_id: str = None):
+
+    def __init__(self, bot_token: str = None, chat_id: str = None,
+                 thread_id: int = None, alerts_thread_id: int = None,
+                 digest_thread_id: int = None, discovery_thread_id: int = None):
         """
         Инициализация Telegram бота
-        
+
         Args:
             bot_token: Токен бота (из переменных окружения)
             chat_id: ID чата/канала для отправки
+            thread_id: ID топика для основных сообщений (опционально)
+            alerts_thread_id: ID топика для алертов (опционально)
+            digest_thread_id: ID топика для дайджестов (опционально)
+            discovery_thread_id: ID топика для Discovery отчетов (опционально)
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
+        self.thread_id = thread_id
+        self.alerts_thread_id = alerts_thread_id
+        self.digest_thread_id = digest_thread_id
+        self.discovery_thread_id = discovery_thread_id
         self.enabled = bool(bot_token and chat_id)
-        
+
+        # Проверка: если chat_id не начинается с "-", это личный чат (не группа)
+        # В личных чатах thread_id игнорируется
+        self.is_group_chat = str(chat_id).startswith('-') if chat_id else False
+
         if not self.enabled:
             logger.warning("Telegram уведомления отключены: не указан bot_token или chat_id")
     
     def send_announcement(self, announcement: Dict) -> bool:
         """
         Отправить анонс в Telegram
-        
+
         Args:
             announcement: Словарь с анонсом
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             logger.debug("Telegram отключен, пропускаем отправку")
             return False
-        
+
         try:
             message = self._format_announcement(announcement)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке в Telegram: {e}", exc_info=True)
             return False
@@ -76,23 +90,23 @@ class TelegramNotifier:
     def send_daily_digest(self, announcements: List[Dict]) -> bool:
         """
         Отправить ежедневный дайджест изменений
-        
+
         Args:
             announcements: Список анонсов за день
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             return False
-        
+
         if not announcements:
             logger.info("Нет анонсов для дайджеста")
             return False
-        
+
         try:
             message = self._format_digest(announcements)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.digest_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке дайджеста: {e}", exc_info=True)
             return False
@@ -100,22 +114,22 @@ class TelegramNotifier:
     def send_discovery_report(self, discovered_files: List[Dict]) -> bool:
         """
         Отправить отчет об обнаруженных новых файлах
-        
+
         Args:
             discovered_files: Список обнаруженных файлов
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             return False
-        
+
         if not discovered_files:
             return False
-        
+
         try:
             message = self._format_discovery_report(discovered_files)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.discovery_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке отчета Discovery: {e}", exc_info=True)
             return False
@@ -123,19 +137,19 @@ class TelegramNotifier:
     def send_version_alert(self, alert_data: Dict) -> bool:
         """
         Отправить алерт о новой версии файла
-        
+
         Args:
             alert_data: Данные алерта (base_name, old_version, new_version, etc.)
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             return False
-        
+
         try:
             message = self._format_version_alert(alert_data)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.alerts_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке версионного алерта: {e}", exc_info=True)
             return False
@@ -143,19 +157,19 @@ class TelegramNotifier:
     def send_migration_success(self, migration_data: Dict) -> bool:
         """
         Отправить уведомление об успешной миграции
-        
+
         Args:
             migration_data: Данные миграции
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             return False
-        
+
         try:
             message = self._format_migration_success(migration_data)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.alerts_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке уведомления о миграции: {e}", exc_info=True)
             return False
@@ -163,19 +177,19 @@ class TelegramNotifier:
     def send_migration_failure(self, migration_data: Dict) -> bool:
         """
         Отправить уведомление о неудачной миграции
-        
+
         Args:
             migration_data: Данные миграции
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             return False
-        
+
         try:
             message = self._format_migration_failure(migration_data)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.alerts_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке уведомления о неудаче: {e}", exc_info=True)
             return False
@@ -183,19 +197,19 @@ class TelegramNotifier:
     def send_404_critical(self, file_data: Dict) -> bool:
         """
         Отправить критический алерт о 404 ошибке
-        
+
         Args:
             file_data: Данные о файле с 404
-            
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             return False
-        
+
         try:
             message = self._format_404_critical(file_data)
-            return self._send_message(message)
+            return self._send_message(message, thread_id=self.alerts_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке 404 алерта: {e}", exc_info=True)
             return False
@@ -456,21 +470,22 @@ class TelegramNotifier:
 """
         return message
     
-    def _send_message(self, message: str, parse_mode: str = "Markdown") -> bool:
+    def _send_message(self, message: str, parse_mode: str = "Markdown", thread_id: int = None) -> bool:
         """
         Отправить сообщение через Telegram Bot API
-        
+
         Args:
             message: Текст сообщения
             parse_mode: Режим парсинга (Markdown или HTML)
-            
+            thread_id: ID топика для отправки (только для групп с топиками)
+
         Returns:
             True если успешно отправлено
         """
         if not self.enabled:
             logger.debug("Telegram отключен")
             return False
-        
+
         try:
             import requests
 
@@ -486,18 +501,26 @@ class TelegramNotifier:
                 "disable_web_page_preview": True
             }
 
+            # Добавить message_thread_id только если:
+            # 1. Это групповой чат (chat_id начинается с "-")
+            # 2. thread_id указан
+            if self.is_group_chat and thread_id is not None:
+                payload["message_thread_id"] = thread_id
+                logger.debug(f"Отправка в топик: thread_id={thread_id}")
+
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            
+
             result = response.json()
-            
+
             if result.get('ok'):
-                logger.info(f"✅ Сообщение успешно отправлено в Telegram (chat_id: {self.chat_id})")
+                thread_info = f", thread_id={thread_id}" if self.is_group_chat and thread_id else ""
+                logger.info(f"✅ Сообщение успешно отправлено в Telegram (chat_id: {self.chat_id}{thread_info})")
                 return True
             else:
                 logger.error(f"❌ Telegram API вернул ошибку: {result.get('description', 'Unknown error')}")
                 return False
-                
+
         except requests.exceptions.RequestException as e:
             # Не логировать полный URL с токеном в ошибках
             logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {type(e).__name__}")
@@ -535,8 +558,8 @@ class TelegramNotifier:
                 
                 # Проверка доступа к чату
                 test_message = f"🔌 Тестовое подключение Tilda Update Checker\nВремя: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                
-                if self._send_message(test_message):
+
+                if self._send_message(test_message, thread_id=self.thread_id):
                     logger.info(f"✅ Chat ID {self.chat_id} доступен для отправки сообщений")
                     return True
                 else:
@@ -558,15 +581,35 @@ class TelegramNotifier:
 def create_notifier() -> TelegramNotifier:
     """
     Создать экземпляр Telegram notifier из переменных окружения
-    
+
     Returns:
         TelegramNotifier объект
     """
     import os
+
     bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
     chat_id = os.getenv('TELEGRAM_CHAT_ID')
-    
-    return TelegramNotifier(bot_token=bot_token, chat_id=chat_id)
+
+    # Получить thread_id из переменных окружения (опционально)
+    thread_id = os.getenv('TELEGRAM_THREAD_ID')
+    alerts_thread_id = os.getenv('TELEGRAM_ALERTS_THREAD_ID')
+    digest_thread_id = os.getenv('TELEGRAM_DIGEST_THREAD_ID')
+    discovery_thread_id = os.getenv('TELEGRAM_DISCOVERY_THREAD_ID')
+
+    # Конвертировать в int если указаны
+    thread_id = int(thread_id) if thread_id else None
+    alerts_thread_id = int(alerts_thread_id) if alerts_thread_id else None
+    digest_thread_id = int(digest_thread_id) if digest_thread_id else None
+    discovery_thread_id = int(discovery_thread_id) if discovery_thread_id else None
+
+    return TelegramNotifier(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        alerts_thread_id=alerts_thread_id,
+        digest_thread_id=digest_thread_id,
+        discovery_thread_id=discovery_thread_id
+    )
 
 
 notifier = create_notifier()
