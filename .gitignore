@@ -67,16 +67,7 @@ tmp/
 archived_versions/
 backups/
 
-# Documentation (игнорируем только временные файлы в docs/)
-docs/**/*.tmp
-docs/**/*.bak
-
-# Игнорировать только markdown файлы в docs/
-docs/**/*.md
-
-# НО сохранить важные .md файлы в корне
+# Documentation - игнорируем всю документацию кроме README.md
+docs/
+*.md
 !README.md
-!DEPLOYMENT.md
-!CLAUDE.md
-!DOCKER_QUICKSTART.md
-!env.example
