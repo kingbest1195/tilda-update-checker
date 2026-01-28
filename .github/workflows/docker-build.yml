@@ -44,6 +44,7 @@ jobs:
           
           # Запустить контейнер в режиме инициализации БД
           docker run --rm \
+            --user root \
             -v $(pwd)/test-data:/app/data \
             -v $(pwd)/test-logs:/app/logs \
             --env-file .env.test \
