@@ -63,6 +63,10 @@ class TelegramNotifier:
         # В личных чатах thread_id игнорируется
         self.is_group_chat = str(chat_id).startswith('-') if chat_id else False
 
+        # Атрибуты для хранения последнего ответа/ошибки
+        self.last_response = None
+        self.last_error = None
+
         if not self.enabled:
             logger.warning("Telegram уведомления отключены: не указан bot_token или chat_id")
     
@@ -484,6 +488,7 @@ class TelegramNotifier:
         """
         if not self.enabled:
             logger.debug("Telegram отключен")
+            self.last_error = "Telegram не настроен (отсутствует bot_token или chat_id)"
             return False
 
         try:
@@ -509,24 +514,36 @@ class TelegramNotifier:
                 logger.debug(f"Отправка в топик: thread_id={thread_id}")
 
             response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
 
+            # Сохранить последний ответ
             result = response.json()
+            self.last_response = result
+
+            response.raise_for_status()
 
             if result.get('ok'):
                 thread_info = f", thread_id={thread_id}" if self.is_group_chat and thread_id else ""
-                logger.info(f"✅ Сообщение успешно отправлено в Telegram (chat_id: {self.chat_id}{thread_info})")
+                message_id = result.get('result', {}).get('message_id', 'N/A')
+                logger.info(f"✅ Сообщение отправлено в Telegram (chat_id: {self.chat_id}{thread_info}, msg_id: {message_id})")
+                logger.debug(f"   Response: {result}")
+                self.last_error = None
                 return True
             else:
-                logger.error(f"❌ Telegram API вернул ошибку: {result.get('description', 'Unknown error')}")
+                error_desc = result.get('description', 'Unknown error')
+                error_code = result.get('error_code', 'N/A')
+                self.last_error = f"[{error_code}] {error_desc}"
+                logger.error(f"❌ Telegram API ошибка: {self.last_error}")
+                logger.error(f"   Payload: chat_id={self.chat_id}, thread_id={thread_id}")
                 return False
 
         except requests.exceptions.RequestException as e:
             # Не логировать полный URL с токеном в ошибках
-            logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {type(e).__name__}")
+            self.last_error = f"HTTP Error: {type(e).__name__}"
+            logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {self.last_error}")
             return False
         except Exception as e:
-            logger.error(f"❌ Непредвиденная ошибка при отправке в Telegram: {type(e).__name__}", exc_info=False)
+            self.last_error = f"Unexpected error: {type(e).__name__}"
+            logger.error(f"❌ Непредвиденная ошибка: {self.last_error}", exc_info=False)
             return False
     
     def test_connection(self) -> bool:

@@ -7,6 +7,7 @@ import signal
 import atexit
 import sys
 from pathlib import Path
+from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -20,6 +21,7 @@ from src.discovery import discovery
 from src.version_detector import detector as version_detector
 from src.migration_manager import manager
 from src.alert_system import alert_system
+from src.telegram_notifier import notifier
 
 
 def setup_logging():
@@ -128,10 +130,10 @@ def check_and_analyze():
         # 4. Сгенерировать и сохранить анонсы
         logger.info("Шаг 4: Генерация анонсов...")
         announcement_ids = generator.save_announcements(analysis_results)
-        
+
         if announcement_ids:
             logger.info(f"✅ Создано анонсов: {len(announcement_ids)}")
-            
+
             # Вывести сводный анонс в лог
             full_announcement = generator.generate_announcement(analysis_results)
             if full_announcement:
@@ -140,6 +142,71 @@ def check_and_analyze():
                 logger.info("=" * 80)
                 logger.info(full_announcement)
                 logger.info("=" * 80)
+
+            # 5. Отправить анонсы в Telegram с отслеживанием статуса
+            logger.info("Шаг 5: Отправка в Telegram...")
+            telegram_sent = 0
+            telegram_failed = 0
+
+            # Создать маппинг: change_id -> announcement_id
+            with db.get_session() as session:
+                from src.database import Announcement
+                id_mapping = {}
+                for ann_id in announcement_ids:
+                    announcement = session.query(Announcement).filter_by(id=ann_id).first()
+                    if announcement:
+                        id_mapping[announcement.change_id] = ann_id
+
+            # Отправить каждый анонс используя данные из analysis_results
+            for result in analysis_results:
+                change_info = result.get('change_info', {})
+                change_id = change_info.get('change_id')
+
+                if not change_id or change_id not in id_mapping:
+                    logger.warning(f"Не найден announcement_id для change_id={change_id}")
+                    continue
+
+                ann_id = id_mapping[change_id]
+
+                # Подготовить данные для отправки (используя analysis_results)
+                announcement_data = {
+                    'id': ann_id,
+                    'url': result.get('url'),
+                    'change_type': result.get('change_type'),
+                    'severity': result.get('severity'),
+                    'title': result.get('url', 'Unknown').split('/')[-1],
+                    'description': result.get('description', ''),
+                    'user_impact': result.get('user_impact', ''),
+                    'recommendations': result.get('recommendations', ''),
+                    'priority': change_info.get('priority', 'MEDIUM'),
+                    'category': change_info.get('category', 'unknown')
+                }
+
+                # Попытка отправки
+                success = notifier.send_announcement(announcement_data)
+
+                # Записать статус отправки
+                error_message = notifier.last_error if not success else None
+                response_data = notifier.last_response
+
+                db.mark_telegram_sent(
+                    announcement_id=ann_id,
+                    success=success,
+                    error=error_message,
+                    response_data=response_data
+                )
+
+                if success:
+                    telegram_sent += 1
+                    logger.info(f"  ✅ Telegram отправлен для анонса ID={ann_id}")
+                else:
+                    telegram_failed += 1
+                    logger.warning(f"  ❌ Telegram не отправлен для анонса ID={ann_id}: {error_message}")
+
+            # Статистика отправки
+            logger.info(f"📊 Telegram статистика: отправлено {telegram_sent}/{len(announcement_ids)}")
+            if telegram_failed > 0:
+                logger.warning(f"⚠️ Не удалось отправить {telegram_failed} сообщений (будет повтор позже)")
         else:
             logger.warning("Анонсы не были созданы")
         
@@ -148,6 +215,68 @@ def check_and_analyze():
         
     except Exception as e:
         logger.error(f"❌ Критическая ошибка при проверке: {e}", exc_info=True)
+
+
+def retry_pending_telegrams():
+    """Повторная отправка неудачных Telegram сообщений"""
+    try:
+        logger.info("=" * 80)
+        logger.info("📤 ПОВТОРНАЯ ОТПРАВКА TELEGRAM СООБЩЕНИЙ")
+        logger.info("=" * 80)
+
+        # Получить ожидающие анонсы
+        pending = db.get_pending_announcements(limit=50)
+
+        if not pending:
+            logger.info("✅ Нет сообщений для повторной отправки")
+            logger.info("=" * 80)
+            return
+
+        logger.info(f"📋 Найдено {len(pending)} сообщений для повторной отправки")
+
+        telegram_sent = 0
+        telegram_failed = 0
+
+        for announcement in pending:
+            # Отправить content как простое сообщение
+            # (в БД уже хранится отформатированный текст)
+            message = f"🔔 *{announcement.title}*\n\n{announcement.content}"
+
+            # Попытка отправки
+            success = notifier._send_message(
+                message,
+                parse_mode="Markdown",
+                thread_id=notifier.thread_id
+            )
+
+            # Записать статус
+            error_message = notifier.last_error if not success else None
+            response_data = notifier.last_response
+
+            db.mark_telegram_sent(
+                announcement_id=announcement.id,
+                success=success,
+                error=error_message,
+                response_data=response_data
+            )
+
+            if success:
+                telegram_sent += 1
+                logger.info(f"  ✅ Успешно отправлен анонс ID={announcement.id}")
+            else:
+                telegram_failed += 1
+                retry_count = announcement.telegram_retry_count + 1
+                logger.warning(
+                    f"  ❌ Не удалось отправить анонс ID={announcement.id} "
+                    f"(попытка {retry_count}): {error_message}"
+                )
+
+        # Итоговая статистика
+        logger.info(f"📊 Результаты повтора: успешно {telegram_sent}, неудачно {telegram_failed}")
+        logger.info("=" * 80)
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при повторе Telegram отправок: {e}", exc_info=True)
 
 
 def run_discovery_and_migrate():
@@ -250,14 +379,50 @@ def run_daemon():
             minute=0,
             id='daily_404_check'
         )
-        
+
+        # Задача 4: Повторная отправка неудачных Telegram сообщений (каждые 15 минут)
+        scheduler.add_job(
+            retry_pending_telegrams,
+            'interval',
+            minutes=15,
+            id='telegram_retry'
+        )
+
         logger.info(f"✅ Планировщик настроен:")
         logger.info(f"   - Проверка изменений: каждые {interval_hours or 1} час(ов)")
         logger.info(f"   - Discovery Mode: каждый понедельник в 9:00")
         logger.info(f"   - Проверка 404: ежедневно в 8:00")
+        logger.info(f"   - Повтор Telegram: каждые 15 минут")
         logger.info("Нажмите Ctrl+C для остановки")
         logger.info("")
-        
+
+        # Проверить Telegram соединение и отправить deployment notification
+        if notifier.enabled:
+            logger.info("🔌 Проверка соединения с Telegram...")
+
+            # Отправить deployment notification
+            deployment_message = (
+                "🚀 *Tilda Update Checker запущен*\n\n"
+                f"📅 Время: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"⏱ Интервал проверки: каждые {interval_hours or 1} час(ов)\n"
+                f"🤖 Режим: daemon mode\n\n"
+                "Система мониторинга Tilda CDN активна."
+            )
+
+            # Отправить в alerts топик
+            success = notifier._send_message(
+                deployment_message,
+                parse_mode="Markdown",
+                thread_id=notifier.alerts_thread_id
+            )
+
+            if success:
+                logger.info("✅ Deployment notification отправлен в Telegram")
+            else:
+                logger.warning(f"⚠️ Не удалось отправить deployment notification: {notifier.last_error}")
+        else:
+            logger.warning("⚠️ Telegram уведомления отключены")
+
         # Выполнить первую проверку сразу
         logger.info("Выполнение первоначальной проверки...")
         check_and_analyze()
@@ -471,15 +636,66 @@ def show_migration_status():
 def show_dashboard():
     """Показать dashboard с общей информацией"""
     logger.info("🎛 Dashboard")
-    
+
     if not db.init_db():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
-    
+
     try:
         alert_system.print_dashboard()
     except Exception as e:
         logger.error(f"Ошибка при выводе dashboard: {e}", exc_info=True)
+
+
+def show_telegram_status():
+    """Показать статистику Telegram отправок"""
+    logger.info("📊 Статистика Telegram")
+
+    if not db.init_db():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+
+    try:
+        stats = db.get_telegram_stats()
+
+        print("\n" + "=" * 80)
+        print("📊 СТАТИСТИКА TELEGRAM ОТПРАВОК")
+        print("=" * 80)
+        print(f"📬 Всего анонсов: {stats['total']}")
+        print(f"✅ Отправлено: {stats['sent']}")
+        print(f"⏳ В очереди: {stats['pending']}")
+        print(f"❌ Неудачно: {stats['failed']}")
+        print(f"📈 Процент успеха: {stats['success_rate']:.1f}%")
+        print("=" * 80)
+
+        # Показать ожидающие анонсы
+        pending = db.get_pending_announcements(limit=10)
+        if pending:
+            print("\n⏳ ОЖИДАЮЩИЕ ОТПРАВКИ (последние 10):")
+            print("-" * 80)
+            for ann in pending:
+                retry_info = f"попытка {ann.telegram_retry_count + 1}" if ann.telegram_retry_count > 0 else "первая попытка"
+                error_info = f"\n   Ошибка: {ann.telegram_error[:50]}..." if ann.telegram_error else ""
+                file_url = ann.change.file.url if ann.change and ann.change.file else "N/A"
+                print(f"  • ID={ann.id} | {file_url}")
+                print(f"    {retry_info}{error_info}")
+            print("-" * 80)
+
+        print()
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики: {e}", exc_info=True)
+
+
+def handle_retry_telegram():
+    """Вручную запустить повтор Telegram отправок"""
+    logger.info("📤 Ручной запуск повтора Telegram отправок")
+
+    if not db.init_db():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+
+    retry_pending_telegrams()
 
 
 def main():
@@ -493,7 +709,7 @@ def main():
   %(prog)s --once                           # Однократная проверка
   %(prog)s --daemon                         # Запуск в фоновом режиме
   %(prog)s --show-announcements             # Показать последние анонсы
-  
+
   # Версионный мониторинг
   %(prog)s --discover                       # Запуск Discovery Mode
   %(prog)s --show-version-updates           # Показать обнаруженные обновления
@@ -502,6 +718,10 @@ def main():
   %(prog)s --version-history tilda-cart     # История версий
   %(prog)s --migration-status               # Статус миграций
   %(prog)s --dashboard                      # Показать dashboard
+
+  # Telegram команды
+  %(prog)s --telegram-status                # Статистика Telegram отправок
+  %(prog)s --retry-telegram                 # Повторить неудачные отправки
         """
     )
     
@@ -576,7 +796,20 @@ def main():
         action="store_true",
         help="Показать dashboard с общей информацией"
     )
-    
+
+    # Telegram команды
+    parser.add_argument(
+        "--telegram-status",
+        action="store_true",
+        help="Показать статистику Telegram отправок"
+    )
+
+    parser.add_argument(
+        "--retry-telegram",
+        action="store_true",
+        help="Вручную повторить отправку неудачных Telegram сообщений"
+    )
+
     # Дополнительные параметры
     parser.add_argument(
         "-n", "--number",
@@ -619,6 +852,10 @@ def main():
         show_migration_status()
     elif args.dashboard:
         show_dashboard()
+    elif args.telegram_status:
+        show_telegram_status()
+    elif args.retry_telegram:
+        handle_retry_telegram()
     else:
         parser.print_help()
         print("\n⚠️ Укажите команду для выполнения\n")

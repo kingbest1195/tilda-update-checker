@@ -88,9 +88,9 @@ class Change(Base):
 
 class Announcement(Base):
     """Модель анонса"""
-    
+
     __tablename__ = "announcements"
-    
+
     id = Column(Integer, primary_key=True)
     change_id = Column(Integer, ForeignKey("changes.id"), nullable=False)
     title = Column(String(500), nullable=False)
@@ -98,17 +98,42 @@ class Announcement(Base):
     change_type = Column(String(100))  # Тип изменения из LLM
     severity = Column(String(50))  # КРИТИЧЕСКОЕ/ВАЖНОЕ/НЕЗНАЧИТЕЛЬНОЕ
     generated_at = Column(DateTime, default=datetime.utcnow)
-    
+
+    # TELEGRAM СТАТУС
+    telegram_sent = Column(Integer, default=0)  # 0 = не отправлено, 1 = отправлено
+    telegram_sent_at = Column(DateTime, nullable=True)  # Время успешной отправки
+    telegram_error = Column(Text, nullable=True)  # Последняя ошибка
+    telegram_retry_count = Column(Integer, default=0)  # Количество попыток
+    telegram_next_retry = Column(DateTime, nullable=True)  # Время следующей попытки
+
     # Связь
     change = relationship("Change", back_populates="announcements")
-    
+
     def __repr__(self):
-        return f"<Announcement(id={self.id}, title='{self.title[:50]}...')>"
+        return f"<Announcement(id={self.id}, title='{self.title[:50]}...', telegram_sent={self.telegram_sent})>"
+
+
+class TelegramLog(Base):
+    """Лог всех попыток отправки в Telegram"""
+
+    __tablename__ = "telegram_logs"
+
+    id = Column(Integer, primary_key=True)
+    announcement_id = Column(Integer, ForeignKey("announcements.id"), nullable=True)
+    message_type = Column(String(50))  # 'announcement', 'alert', 'digest', 'startup'
+    success = Column(Integer)  # 0 = ошибка, 1 = успех
+    error_message = Column(Text, nullable=True)
+    response_data = Column(Text, nullable=True)  # JSON ответа от Telegram
+    sent_at = Column(DateTime, default=datetime.utcnow)
+    thread_id = Column(Integer, nullable=True)
+
+    def __repr__(self):
+        return f"<TelegramLog(id={self.id}, type='{self.message_type}', success={self.success})>"
 
 
 class DiscoveredFile(Base):
     """Модель обнаруженного нового файла (Discovery Mode)"""
-    
+
     __tablename__ = "discovered_files"
     
     id = Column(Integer, primary_key=True)
@@ -776,6 +801,147 @@ class Database:
             
         finally:
             session.close()
+
+    # ==================== МЕТОДЫ ДЛЯ TELEGRAM СТАТУСА ====================
+
+    def get_pending_announcements(self, limit: int = 10) -> List[Announcement]:
+        """
+        Получить анонсы, ожидающие отправки в Telegram
+
+        Args:
+            limit: Максимальное количество анонсов
+
+        Returns:
+            Список анонсов с telegram_sent=0 или с истекшим next_retry
+        """
+        from sqlalchemy.orm import joinedload
+
+        with self.SessionLocal() as session:
+            now = datetime.utcnow()
+
+            results = session.query(Announcement)\
+                .options(
+                    joinedload(Announcement.change).joinedload(Change.file)
+                )\
+                .filter(
+                    (Announcement.telegram_sent == 0) &
+                    (
+                        (Announcement.telegram_next_retry.is_(None)) |
+                        (Announcement.telegram_next_retry <= now)
+                    )
+                )\
+                .order_by(Announcement.generated_at.asc())\
+                .limit(limit)\
+                .all()
+
+            # Сделать объекты expunged, чтобы они оставались доступными после закрытия сессии
+            for ann in results:
+                session.expunge(ann)
+
+            return results
+
+    def mark_telegram_sent(self, announcement_id: int, success: bool,
+                          error: str = None, response_data: dict = None) -> bool:
+        """
+        Отметить статус отправки в Telegram
+
+        Args:
+            announcement_id: ID анонса
+            success: True если успешно отправлено
+            error: Текст ошибки (если неудача)
+            response_data: Ответ от Telegram API
+
+        Returns:
+            True если успешно обновлено
+        """
+        session = self.get_session()
+        try:
+            announcement = session.query(Announcement).filter_by(
+                id=announcement_id
+            ).first()
+
+            if not announcement:
+                logger.error(f"Анонс {announcement_id} не найден")
+                return False
+
+            if success:
+                # Успешная отправка
+                announcement.telegram_sent = 1
+                announcement.telegram_sent_at = datetime.utcnow()
+                announcement.telegram_error = None
+                announcement.telegram_next_retry = None
+            else:
+                # Ошибка отправки
+                announcement.telegram_retry_count += 1
+                announcement.telegram_error = error
+
+                # Экспоненциальная задержка: 5 мин, 15 мин, 30 мин, 1 час, 2 часа
+                from datetime import timedelta
+                delays = [5, 15, 30, 60, 120]  # минуты
+                delay_minutes = delays[min(announcement.telegram_retry_count - 1, len(delays) - 1)]
+
+                announcement.telegram_next_retry = datetime.utcnow() + timedelta(minutes=delay_minutes)
+
+                logger.warning(
+                    f"Telegram отправка неудачна (попытка {announcement.telegram_retry_count}). "
+                    f"Следующая попытка через {delay_minutes} мин"
+                )
+
+            # Записать в лог
+            log_entry = TelegramLog(
+                announcement_id=announcement_id,
+                message_type='announcement',
+                success=1 if success else 0,
+                error_message=error,
+                response_data=str(response_data) if response_data else None,
+                sent_at=datetime.utcnow()
+            )
+            session.add(log_entry)
+
+            session.commit()
+            return True
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Ошибка обновления Telegram статуса: {e}")
+            return False
+        finally:
+            session.close()
+
+    def get_telegram_stats(self) -> dict:
+        """Получить статистику отправки в Telegram"""
+        with self.SessionLocal() as session:
+            total = session.query(Announcement).count()
+            sent = session.query(Announcement).filter_by(telegram_sent=1).count()
+            pending = session.query(Announcement).filter_by(telegram_sent=0).count()
+
+            failed = session.query(Announcement).filter(
+                (Announcement.telegram_sent == 0) &
+                (Announcement.telegram_retry_count > 0)
+            ).count()
+
+            return {
+                'total': total,
+                'sent': sent,
+                'pending': pending,
+                'failed': failed,
+                'success_rate': (sent / total * 100) if total > 0 else 0
+            }
+
+    def get_announcements_since(self, since: datetime) -> List[Announcement]:
+        """
+        Получить анонсы с определенной даты
+
+        Args:
+            since: Дата начала
+
+        Returns:
+            Список анонсов
+        """
+        with self.SessionLocal() as session:
+            return session.query(Announcement).filter(
+                Announcement.generated_at >= since
+            ).order_by(Announcement.generated_at.desc()).all()
 
 
 # Глобальный экземпляр базы данных
