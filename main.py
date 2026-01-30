@@ -29,15 +29,15 @@ def setup_logging():
     # Создать директорию для логов если не существует
     log_dir = Path(config.BASE_DIR / "logs")
     log_dir.mkdir(exist_ok=True)
-    
+
     # Настроить формат логов
     log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
-    
+
     # Основной logger
     logger = logging.getLogger()
     logger.setLevel(config.LOG_LEVEL)
-    
+
     # Обработчик для файла
     file_handler = logging.FileHandler(
         config.BASE_DIR / config.LOG_FILE,
@@ -45,17 +45,51 @@ def setup_logging():
     )
     file_handler.setLevel(config.LOG_LEVEL)
     file_handler.setFormatter(logging.Formatter(log_format, date_format))
-    
+
     # Обработчик для консоли
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(config.LOG_LEVEL)
     console_handler.setFormatter(logging.Formatter(log_format, date_format))
-    
+
     # Добавить обработчики
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
-    
+
     return logger
+
+
+def init_database_with_health_check():
+    """
+    Инициализировать БД с проверкой здоровья и автоматической миграцией.
+
+    Эта функция является единой точкой инициализации БД для всего приложения.
+    Она выполняет:
+    1. Базовую инициализацию БД (создание таблиц)
+    2. Автоматическую миграцию схемы (через _check_and_migrate_schema)
+    3. Health check для валидации корректности БД
+
+    Returns:
+        bool: True если БД готова к работе (healthy или degraded)
+              False если БД полностью нерабочая (unhealthy)
+    """
+    # Базовая инициализация с автоматической миграцией
+    if not db.init_db():
+        logger.error("❌ Не удалось инициализировать базу данных")
+        return False
+
+    # Комплексная проверка здоровья БД
+    health = db.health_check()
+
+    if health['status'] == 'healthy':
+        logger.info("✅ БД здорова и готова к работе")
+        return True
+    elif health['status'] == 'degraded':
+        logger.warning(f"⚠️ БД в деградированном состоянии: {health['details']}")
+        logger.warning("⚠️ Приложение продолжит работу, но функциональность может быть ограничена")
+        return True
+    else:
+        logger.error(f"❌ БД нездорова и не может использоваться: {health['details']}")
+        return False
 
 
 logger = setup_logging()
@@ -224,8 +258,27 @@ def retry_pending_telegrams():
         logger.info("📤 ПОВТОРНАЯ ОТПРАВКА TELEGRAM СООБЩЕНИЙ")
         logger.info("=" * 80)
 
-        # Получить ожидающие анонсы
-        pending = db.get_pending_announcements(limit=50)
+        # Проверить инициализацию БД
+        if not db.SessionLocal:
+            logger.warning("⚠️ БД не инициализирована, пропуск повторной отправки")
+            return
+
+        # Получить ожидающие анонсы с обработкой ошибок схемы
+        try:
+            pending = db.get_pending_announcements(limit=50)
+        except Exception as db_error:
+            # Проверить, является ли это ошибкой схемы БД
+            error_msg = str(db_error)
+            if "no such column" in error_msg or "OperationalError" in str(type(db_error).__name__):
+                logger.error(
+                    "❌ Ошибка схемы БД: отсутствуют колонки для Telegram статуса.\n"
+                    "   Решение: перезапустите приложение для автоматической миграции БД.\n"
+                    f"   Детали: {error_msg}"
+                )
+                return
+            else:
+                # Для других ошибок БД пробрасываем дальше
+                raise
 
         if not pending:
             logger.info("✅ Нет сообщений для повторной отправки")
@@ -238,37 +291,45 @@ def retry_pending_telegrams():
         telegram_failed = 0
 
         for announcement in pending:
-            # Отправить content как простое сообщение
-            # (в БД уже хранится отформатированный текст)
-            message = f"🔔 *{announcement.title}*\n\n{announcement.content}"
+            try:
+                # Отправить content как простое сообщение
+                # (в БД уже хранится отформатированный текст)
+                message = f"🔔 *{announcement.title}*\n\n{announcement.content}"
 
-            # Попытка отправки
-            success = notifier._send_message(
-                message,
-                parse_mode="Markdown",
-                thread_id=notifier.thread_id
-            )
+                # Попытка отправки
+                success = notifier._send_message(
+                    message,
+                    parse_mode="Markdown",
+                    thread_id=notifier.thread_id
+                )
 
-            # Записать статус
-            error_message = notifier.last_error if not success else None
-            response_data = notifier.last_response
+                # Записать статус
+                error_message = notifier.last_error if not success else None
+                response_data = notifier.last_response
 
-            db.mark_telegram_sent(
-                announcement_id=announcement.id,
-                success=success,
-                error=error_message,
-                response_data=response_data
-            )
+                db.mark_telegram_sent(
+                    announcement_id=announcement.id,
+                    success=success,
+                    error=error_message,
+                    response_data=response_data
+                )
 
-            if success:
-                telegram_sent += 1
-                logger.info(f"  ✅ Успешно отправлен анонс ID={announcement.id}")
-            else:
+                if success:
+                    telegram_sent += 1
+                    logger.info(f"  ✅ Успешно отправлен анонс ID={announcement.id}")
+                else:
+                    telegram_failed += 1
+                    retry_count = announcement.telegram_retry_count + 1
+                    logger.warning(
+                        f"  ❌ Не удалось отправить анонс ID={announcement.id} "
+                        f"(попытка {retry_count}): {error_message}"
+                    )
+
+            except Exception as send_error:
                 telegram_failed += 1
-                retry_count = announcement.telegram_retry_count + 1
-                logger.warning(
-                    f"  ❌ Не удалось отправить анонс ID={announcement.id} "
-                    f"(попытка {retry_count}): {error_message}"
+                logger.error(
+                    f"  ❌ Исключение при отправке анонса ID={announcement.id}: {send_error}",
+                    exc_info=False
                 )
 
         # Итоговая статистика
@@ -276,7 +337,7 @@ def retry_pending_telegrams():
         logger.info("=" * 80)
 
     except Exception as e:
-        logger.error(f"❌ Ошибка при повторе Telegram отправок: {e}", exc_info=True)
+        logger.error(f"❌ Критическая ошибка в retry_pending_telegrams: {e}", exc_info=True)
 
 
 def run_discovery_and_migrate():
@@ -340,7 +401,7 @@ def run_daemon():
     logger.info(f"Интервал проверки: {config.TILDA_CHECK_INTERVAL} секунд")
     
     # Инициализировать БД
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -442,7 +503,7 @@ def run_once():
     logger.info("🔍 Запуск однократной проверки")
     
     # Инициализировать БД
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -460,7 +521,7 @@ def show_announcements(limit: int = 10):
     logger.info(f"📋 Получение последних {limit} анонсов...")
     
     # Инициализировать БД
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -483,7 +544,7 @@ def run_discovery_mode():
     """Запуск Discovery Mode вручную"""
     logger.info("🔍 Запуск Discovery Mode вручную")
     
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -494,7 +555,7 @@ def show_version_updates():
     """Показать обнаруженные обновления версий"""
     logger.info("🆕 Проверка обновлений версий...")
     
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -528,7 +589,7 @@ def migrate_file(base_name: str, to_version: str):
     """
     logger.info(f"🔄 Миграция {base_name} на версию {to_version}")
     
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -573,7 +634,7 @@ def rollback_file(base_name: str, to_version: str):
     """
     logger.info(f"🔙 Откат {base_name} к версии {to_version}")
     
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -598,7 +659,7 @@ def show_version_history(base_name: str):
     """
     logger.info(f"📜 История версий для {base_name}")
     
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -620,7 +681,7 @@ def show_migration_status():
     """Показать статус всех миграций"""
     logger.info("📊 Получение статуса миграций...")
     
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
     
@@ -637,7 +698,7 @@ def show_dashboard():
     """Показать dashboard с общей информацией"""
     logger.info("🎛 Dashboard")
 
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
 
@@ -651,7 +712,7 @@ def show_telegram_status():
     """Показать статистику Telegram отправок"""
     logger.info("📊 Статистика Telegram")
 
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
 
@@ -691,7 +752,7 @@ def handle_retry_telegram():
     """Вручную запустить повтор Telegram отправок"""
     logger.info("📤 Ручной запуск повтора Telegram отправок")
 
-    if not db.init_db():
+    if not init_database_with_health_check():
         logger.error("Не удалось инициализировать базу данных")
         sys.exit(1)
 

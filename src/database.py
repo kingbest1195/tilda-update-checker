@@ -15,6 +15,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Float,
+    text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 
@@ -254,30 +255,184 @@ class Database:
             # Создать директорию для БД если не существует
             db_path = Path(config.BASE_DIR / config.DATABASE_PATH)
             db_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Создать движок
             self.engine = create_engine(
                 self.database_url,
                 echo=False,
                 connect_args={"check_same_thread": False}  # Для SQLite
             )
-            
+
             # Создать таблицы
             Base.metadata.create_all(self.engine)
-            
+
             # Создать фабрику сессий
             self.SessionLocal = sessionmaker(
                 autoflush=False,
                 bind=self.engine
             )
-            
+
             logger.info(f"База данных инициализирована: {db_path}")
+
+            # Автоматическая проверка и миграция схемы
+            if not self._check_and_migrate_schema():
+                logger.warning("⚠️ Миграция схемы БД не удалась, но приложение продолжит работу")
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Ошибка при инициализации БД: {e}", exc_info=True)
             return False
     
+    def health_check(self) -> dict:
+        """
+        Проверить здоровье базы данных
+
+        Returns:
+            dict с результатами проверки: {
+                'status': 'healthy' | 'degraded' | 'unhealthy',
+                'checks': {
+                    'connection': bool,
+                    'tables': bool,
+                    'schema': bool
+                },
+                'details': dict
+            }
+        """
+        result = {
+            'status': 'healthy',
+            'checks': {
+                'connection': False,
+                'tables': False,
+                'schema': False
+            },
+            'details': {}
+        }
+
+        try:
+            # Проверка 1: Подключение к БД
+            if not self.engine:
+                result['status'] = 'unhealthy'
+                result['details']['connection'] = 'Engine not initialized'
+                return result
+
+            with self.engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+                result['checks']['connection'] = True
+
+            # Проверка 2: Наличие таблиц
+            from sqlalchemy import inspect
+            inspector = inspect(self.engine)
+            table_names = inspector.get_table_names()
+
+            required_tables = ['files', 'changes', 'announcements', 'file_versions',
+                             'discovered_files', 'version_alerts', 'migration_metrics',
+                             'telegram_logs']
+
+            missing_tables = [t for t in required_tables if t not in table_names]
+
+            if missing_tables:
+                result['status'] = 'degraded'
+                result['details']['missing_tables'] = missing_tables
+            else:
+                result['checks']['tables'] = True
+
+            # Проверка 3: Схема таблицы announcements
+            if 'announcements' in table_names:
+                columns = [col['name'] for col in inspector.get_columns('announcements')]
+                required_columns = ['id', 'change_id', 'title', 'content',
+                                  'telegram_sent', 'telegram_sent_at',
+                                  'telegram_error', 'telegram_retry_count',
+                                  'telegram_next_retry']
+
+                missing_columns = [c for c in required_columns if c not in columns]
+
+                if missing_columns:
+                    result['status'] = 'degraded'
+                    result['details']['missing_columns'] = missing_columns
+                else:
+                    result['checks']['schema'] = True
+
+            # Итоговый статус
+            if all(result['checks'].values()):
+                result['status'] = 'healthy'
+            elif result['checks']['connection']:
+                result['status'] = 'degraded'
+            else:
+                result['status'] = 'unhealthy'
+
+            return result
+
+        except Exception as e:
+            result['status'] = 'unhealthy'
+            result['details']['error'] = str(e)
+            return result
+
+    def _check_and_migrate_schema(self) -> bool:
+        """
+        Проверить схему БД и выполнить миграции при необходимости
+
+        Returns:
+            True если схема корректна или успешно обновлена, False при ошибке
+        """
+        try:
+            from sqlalchemy import text, inspect
+
+            inspector = inspect(self.engine)
+
+            # Проверить таблицу announcements
+            if 'announcements' not in inspector.get_table_names():
+                logger.info("✅ Таблица announcements еще не создана, миграция не требуется")
+                return True
+
+            # Получить список колонок
+            columns = [col['name'] for col in inspector.get_columns('announcements')]
+
+            # Проверить наличие Telegram полей
+            telegram_fields = ['telegram_sent', 'telegram_sent_at', 'telegram_error',
+                             'telegram_retry_count', 'telegram_next_retry']
+
+            missing_fields = [field for field in telegram_fields if field not in columns]
+
+            if not missing_fields:
+                logger.info("✅ Схема БД актуальна, все поля присутствуют")
+                return True
+
+            # Выполнить миграцию
+            logger.info(f"📝 Обнаружены отсутствующие поля: {missing_fields}")
+            logger.info("🔄 Запуск автоматической миграции...")
+
+            with self.get_session() as session:
+                # Добавить отсутствующие колонки
+                if 'telegram_sent' in missing_fields:
+                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_sent INTEGER DEFAULT 0"))
+                    logger.info("   ✓ telegram_sent добавлено")
+
+                if 'telegram_sent_at' in missing_fields:
+                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_sent_at DATETIME"))
+                    logger.info("   ✓ telegram_sent_at добавлено")
+
+                if 'telegram_error' in missing_fields:
+                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_error TEXT"))
+                    logger.info("   ✓ telegram_error добавлено")
+
+                if 'telegram_retry_count' in missing_fields:
+                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_retry_count INTEGER DEFAULT 0"))
+                    logger.info("   ✓ telegram_retry_count добавлено")
+
+                if 'telegram_next_retry' in missing_fields:
+                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_next_retry DATETIME"))
+                    logger.info("   ✓ telegram_next_retry добавлено")
+
+                session.commit()
+
+            logger.info("✅ Миграция схемы БД успешно завершена")
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка при миграции схемы БД: {e}", exc_info=True)
+            return False
+
     def get_session(self) -> Session:
         """Получить сессию базы данных"""
         if not self.SessionLocal:
@@ -294,12 +449,12 @@ class Database:
         with self.SessionLocal() as session:
             return session.query(TrackedFile).filter(TrackedFile.url == url).first()
     
-    def save_file_state(self, url: str, file_type: str, content: str, 
+    def save_file_state(self, url: str, file_type: str, content: str,
                        content_hash: str, size: int, category: str = 'unknown',
                        priority: str = 'MEDIUM', domain: str = None) -> TrackedFile:
         """
         Сохранить или обновить состояние файла
-        
+
         Args:
             url: URL файла
             file_type: Тип файла ('js' или 'css')
@@ -309,58 +464,56 @@ class Database:
             category: Категория файла (core, members, ecommerce, etc.)
             priority: Приоритет (CRITICAL, HIGH, MEDIUM, LOW)
             domain: Домен файла (auto-extracted if None)
-            
+
         Returns:
             TrackedFile объект
         """
-        session = self.get_session()
-        try:
-            # Извлечь домен из URL если не передан
-            if domain is None:
-                from urllib.parse import urlparse
-                parsed = urlparse(url)
-                domain = parsed.netloc
-            
-            # Попытаться найти существующий файл
-            tracked_file = session.query(TrackedFile).filter(
-                TrackedFile.url == url
-            ).first()
-            
-            if tracked_file:
-                # Обновить существующий
-                tracked_file.last_hash = content_hash
-                tracked_file.last_content = content
-                tracked_file.last_size = size
-                tracked_file.last_checked = datetime.utcnow()
-                tracked_file.category = category
-                tracked_file.priority = priority
-                tracked_file.domain = domain
-            else:
-                # Создать новый
-                tracked_file = TrackedFile(
-                    url=url,
-                    file_type=file_type,
-                    last_hash=content_hash,
-                    last_content=content,
-                    last_size=size,
-                    last_checked=datetime.utcnow(),
-                    category=category,
-                    priority=priority,
-                    domain=domain
-                )
-                session.add(tracked_file)
-            
-            session.commit()
-            session.refresh(tracked_file)
-            logger.debug(f"Сохранено состояние файла: {url} (category={category}, priority={priority})")
-            return tracked_file
-            
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Ошибка при сохранении файла: {e}", exc_info=True)
-            raise
-        finally:
-            session.close()
+        with self.SessionLocal() as session:
+            try:
+                # Извлечь домен из URL если не передан
+                if domain is None:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    domain = parsed.netloc
+
+                # Попытаться найти существующий файл
+                tracked_file = session.query(TrackedFile).filter(
+                    TrackedFile.url == url
+                ).first()
+
+                if tracked_file:
+                    # Обновить существующий
+                    tracked_file.last_hash = content_hash
+                    tracked_file.last_content = content
+                    tracked_file.last_size = size
+                    tracked_file.last_checked = datetime.utcnow()
+                    tracked_file.category = category
+                    tracked_file.priority = priority
+                    tracked_file.domain = domain
+                else:
+                    # Создать новый
+                    tracked_file = TrackedFile(
+                        url=url,
+                        file_type=file_type,
+                        last_hash=content_hash,
+                        last_content=content,
+                        last_size=size,
+                        last_checked=datetime.utcnow(),
+                        category=category,
+                        priority=priority,
+                        domain=domain
+                    )
+                    session.add(tracked_file)
+
+                session.commit()
+                session.refresh(tracked_file)
+                logger.debug(f"Сохранено состояние файла: {url} (category={category}, priority={priority})")
+                return tracked_file
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при сохранении файла: {e}", exc_info=True)
+                raise
     
     def save_change(self, file_id: int, old_hash: str, new_hash: str,
                    old_size: int, new_size: int, diff_summary: str,
@@ -381,30 +534,28 @@ class Database:
         Returns:
             Change объект
         """
-        session = self.get_session()
-        try:
-            change = Change(
-                file_id=file_id,
-                old_hash=old_hash,
-                new_hash=new_hash,
-                old_size=old_size,
-                new_size=new_size,
-                diff_summary=diff_summary,
-                change_percent=change_percent,
-                is_significant=1 if is_significant else 0
-            )
-            session.add(change)
-            session.commit()
-            session.refresh(change)
-            logger.info(f"Сохранено изменение для файла ID={file_id}")
-            return change
-            
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Ошибка при сохранении изменения: {e}", exc_info=True)
-            raise
-        finally:
-            session.close()
+        with self.SessionLocal() as session:
+            try:
+                change = Change(
+                    file_id=file_id,
+                    old_hash=old_hash,
+                    new_hash=new_hash,
+                    old_size=old_size,
+                    new_size=new_size,
+                    diff_summary=diff_summary,
+                    change_percent=change_percent,
+                    is_significant=1 if is_significant else 0
+                )
+                session.add(change)
+                session.commit()
+                session.refresh(change)
+                logger.info(f"Сохранено изменение для файла ID={file_id}")
+                return change
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при сохранении изменения: {e}", exc_info=True)
+                raise
     
     def save_announcement(self, change_id: int, title: str, content: str,
                          change_type: str = None, severity: str = None) -> Announcement:
@@ -421,27 +572,25 @@ class Database:
         Returns:
             Announcement объект
         """
-        session = self.get_session()
-        try:
-            announcement = Announcement(
-                change_id=change_id,
-                title=title,
-                content=content,
-                change_type=change_type,
-                severity=severity
-            )
-            session.add(announcement)
-            session.commit()
-            session.refresh(announcement)
-            logger.info(f"Сохранен анонс для изменения ID={change_id}")
-            return announcement
-            
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Ошибка при сохранении анонса: {e}", exc_info=True)
-            raise
-        finally:
-            session.close()
+        with self.SessionLocal() as session:
+            try:
+                announcement = Announcement(
+                    change_id=change_id,
+                    title=title,
+                    content=content,
+                    change_type=change_type,
+                    severity=severity
+                )
+                session.add(announcement)
+                session.commit()
+                session.refresh(announcement)
+                logger.info(f"Сохранен анонс для изменения ID={change_id}")
+                return announcement
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при сохранении анонса: {e}", exc_info=True)
+                raise
     
     def get_recent_announcements(self, limit: int = 10) -> List[Announcement]:
         """
@@ -854,59 +1003,57 @@ class Database:
         Returns:
             True если успешно обновлено
         """
-        session = self.get_session()
-        try:
-            announcement = session.query(Announcement).filter_by(
-                id=announcement_id
-            ).first()
+        with self.SessionLocal() as session:
+            try:
+                announcement = session.query(Announcement).filter_by(
+                    id=announcement_id
+                ).first()
 
-            if not announcement:
-                logger.error(f"Анонс {announcement_id} не найден")
-                return False
+                if not announcement:
+                    logger.error(f"Анонс {announcement_id} не найден")
+                    return False
 
-            if success:
-                # Успешная отправка
-                announcement.telegram_sent = 1
-                announcement.telegram_sent_at = datetime.utcnow()
-                announcement.telegram_error = None
-                announcement.telegram_next_retry = None
-            else:
-                # Ошибка отправки
-                announcement.telegram_retry_count += 1
-                announcement.telegram_error = error
+                if success:
+                    # Успешная отправка
+                    announcement.telegram_sent = 1
+                    announcement.telegram_sent_at = datetime.utcnow()
+                    announcement.telegram_error = None
+                    announcement.telegram_next_retry = None
+                else:
+                    # Ошибка отправки
+                    announcement.telegram_retry_count += 1
+                    announcement.telegram_error = error
 
-                # Экспоненциальная задержка: 5 мин, 15 мин, 30 мин, 1 час, 2 часа
-                from datetime import timedelta
-                delays = [5, 15, 30, 60, 120]  # минуты
-                delay_minutes = delays[min(announcement.telegram_retry_count - 1, len(delays) - 1)]
+                    # Экспоненциальная задержка: 5 мин, 15 мин, 30 мин, 1 час, 2 часа
+                    from datetime import timedelta
+                    delays = [5, 15, 30, 60, 120]  # минуты
+                    delay_minutes = delays[min(announcement.telegram_retry_count - 1, len(delays) - 1)]
 
-                announcement.telegram_next_retry = datetime.utcnow() + timedelta(minutes=delay_minutes)
+                    announcement.telegram_next_retry = datetime.utcnow() + timedelta(minutes=delay_minutes)
 
-                logger.warning(
-                    f"Telegram отправка неудачна (попытка {announcement.telegram_retry_count}). "
-                    f"Следующая попытка через {delay_minutes} мин"
+                    logger.warning(
+                        f"Telegram отправка неудачна (попытка {announcement.telegram_retry_count}). "
+                        f"Следующая попытка через {delay_minutes} мин"
+                    )
+
+                # Записать в лог
+                log_entry = TelegramLog(
+                    announcement_id=announcement_id,
+                    message_type='announcement',
+                    success=1 if success else 0,
+                    error_message=error,
+                    response_data=str(response_data) if response_data else None,
+                    sent_at=datetime.utcnow()
                 )
+                session.add(log_entry)
 
-            # Записать в лог
-            log_entry = TelegramLog(
-                announcement_id=announcement_id,
-                message_type='announcement',
-                success=1 if success else 0,
-                error_message=error,
-                response_data=str(response_data) if response_data else None,
-                sent_at=datetime.utcnow()
-            )
-            session.add(log_entry)
+                session.commit()
+                return True
 
-            session.commit()
-            return True
-
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Ошибка обновления Telegram статуса: {e}")
-            return False
-        finally:
-            session.close()
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка обновления Telegram статуса: {e}")
+                return False
 
     def get_telegram_stats(self) -> dict:
         """Получить статистику отправки в Telegram"""
