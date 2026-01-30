@@ -165,7 +165,9 @@ class DiffDetector:
             'change_percent': change_percent,
             'is_significant': is_significant,
             'stats': stats,
-            'diff_lines': diff[:100]  # Ограничить количество строк
+            'diff_lines': diff[:100],  # Ограничить количество строк
+            'old_content': old_content,  # Добавлен для prepare_llm_context
+            'new_content': new_content   # Добавлен для prepare_llm_context
         }
     
     def _create_summary(self, size_diff: int, added: int, removed: int,
@@ -237,42 +239,74 @@ class DiffDetector:
     
     def prepare_llm_context(self, change_info: Dict, max_tokens: int = None) -> str:
         """
-        Подготовить контекст для отправки в LLM
-        
+        Подготовить контекст для отправки в LLM с реальными фрагментами кода
+
         Args:
             change_info: Информация об изменении
             max_tokens: Максимальное количество токенов (примерно)
-            
+
         Returns:
             Подготовленный текст для LLM
         """
         if max_tokens is None:
             max_tokens = config.MAX_DIFF_TOKENS
-        
+
         stats = change_info['stats']
-        
-        context = f"""Файл: {change_info['url']}
-Тип: {change_info['file_type']}
 
-Метаданные изменения:
-- Старый размер: {change_info['old_size']} байт
-- Новый размер: {change_info['new_size']} байт
-- Разница: {change_info['size_diff']} байт ({change_info['change_percent']}%)
-- Добавлено строк: {stats['added_lines']}
-- Удалено строк: {stats['removed_lines']}
-- Всего изменений: {stats['total_changes']}
+        # Базовый контекст
+        context_parts = [
+            f"Файл: {change_info['url']}",
+            f"Тип: {change_info['file_type']}",
+            f"Категория: {change_info.get('category', 'unknown')}",
+            "",
+            "Метаданные изменения:",
+            f"- Разница: {change_info['size_diff']} байт ({change_info['change_percent']}%)",
+            f"- Добавлено строк: {stats['added_lines']}",
+            f"- Удалено строк: {stats['removed_lines']}",
+            ""
+        ]
 
-Краткое описание: {change_info['summary']}
-"""
-        
-        # Примерно 4 символа = 1 токен
-        # Оставить место для остального промпта (~500 токенов)
-        remaining_chars = (max_tokens - 500) * 4
-        
-        if len(context) < remaining_chars:
-            return context
-        else:
-            return context[:remaining_chars] + "\n... (контекст обрезан)"
+        # Добавить фрагменты diff если доступны
+        diff_lines = change_info.get('diff_lines', [])
+
+        if diff_lines:
+            context_parts.append("Ключевые изменения в коде:")
+            context_parts.append("```")
+
+            # Извлечь только строки с изменениями (+ и -)
+            code_changes = []
+            for line in diff_lines[:100]:  # Увеличено с 50 до 100 строк
+                if line.startswith('+') and not line.startswith('+++'):
+                    # Для минифицированного кода - разбить длинные строки
+                    if len(line) > 200:
+                        # Разбить по точке с запятой, взять первые 5 фрагментов
+                        fragments = line[1:].split(';')[:5]
+                        for frag in fragments:
+                            if frag.strip():
+                                code_changes.append(f"+{frag.strip()};")
+                    else:
+                        code_changes.append(line)
+                elif line.startswith('-') and not line.startswith('---'):
+                    if len(line) > 200:
+                        fragments = line[1:].split(';')[:5]
+                        for frag in fragments:
+                            if frag.strip():
+                                code_changes.append(f"-{frag.strip()};")
+                    else:
+                        code_changes.append(line)
+
+            context_parts.extend(code_changes[:50])  # Топ 50 фрагментов (было 30)
+            context_parts.append("```")
+
+        # Проверить лимит токенов
+        full_context = "\n".join(context_parts)
+        estimated_tokens = len(full_context) // 4
+
+        if estimated_tokens > max_tokens - 500:
+            allowed_chars = (max_tokens - 500) * 4
+            return full_context[:allowed_chars] + "\n... (контекст обрезан)"
+
+        return full_context
 
 
 # Глобальный экземпляр детектора

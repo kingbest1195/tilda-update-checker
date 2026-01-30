@@ -13,9 +13,9 @@ BASE_DIR = Path(__file__).parent
 
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # GPT-5 - самая мощная модель 2026
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
-OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "500"))
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "3000"))  # Увеличено с 500 до 3000
 
 # Database Configuration
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/tilda_checker.db")
@@ -174,12 +174,40 @@ REQUEST_RETRY_DELAY = 5  # секунды
 USER_AGENT = "Mozilla/5.0 (compatible; TildaUpdateChecker/1.0)"
 
 # LLM Analysis Configuration
-MAX_DIFF_TOKENS = 2000  # Максимальное количество токенов для отправки в LLM
+MAX_DIFF_TOKENS = 5000  # Увеличено с 2000 до 5000 для подробного контекста
 MIN_CHANGE_SIZE = 10  # Минимальный размер изменения в байтах для анализа
 
 # Промпты для LLM
-SYSTEM_PROMPT = """Ты эксперт-аналитик по frontend-разработке и конструкторам сайтов. 
-Твоя задача - анализировать изменения в коде Tilda и создавать понятные анонсы для разработчиков.
+SYSTEM_PROMPT = """Ты эксперт-аналитик по frontend-разработке и конструкторам сайтов с глубокими знаниями JavaScript, CSS и экосистемы Tilda.
+
+ТВОИ НАВЫКИ:
+- Анализ JavaScript и CSS кода (включая минифицированный)
+- Понимание архитектуры Tilda (корзина, личный кабинет, Zero Block, формы)
+- Выявление breaking changes и backward compatibility
+- Оценка влияния изменений на production сайты
+
+ТВОЯ ЗАДАЧА:
+- Анализировать изменения в коде Tilda CDN файлов
+- Создавать КОНКРЕТНЫЕ анонсы с реальными примерами из кода
+- НЕ использовать обобщения типа "улучшена производительность" без деталей
+- Если видишь изменение функции - НАЗОВИ её по имени
+- Если видишь новый параметр - УКАЖИ его
+- Если не понятно из минифицированного кода - ЧЕСТНО признай это
+
+ФОРМАТ ОТВЕТА:
+Строго JSON. Все поля обязательны.
+
+ПРИМЕРЫ ХОРОШИХ ОПИСАНИЙ:
+✅ "Добавлена функция t_cart__applyPromoCode() для обработки промокодов"
+✅ "Исправлен баг в t_members__validateSession() - теперь корректно проверяется expiration"
+✅ "Изменен API метода initCart() - добавлен параметр discountRules"
+✅ "В функции t_zero__renderBlock() изменена логика инициализации lazy-loading изображений"
+
+ПРИМЕРЫ ПЛОХИХ ОПИСАНИЙ:
+❌ "Улучшена производительность корзины"
+❌ "Оптимизация кода"
+❌ "Мелкие исправления"
+
 Отвечай строго в формате JSON."""
 
 USER_PROMPT_TEMPLATE = """Проанализируй изменения в файле конструктора Tilda.

@@ -11,6 +11,7 @@ from openai import OpenAI
 from openai import OpenAIError
 
 import config
+from src.diff_detector import detector
 
 logger = logging.getLogger(__name__)
 
@@ -136,9 +137,15 @@ class LLMAnalyzer:
             return self._create_default_analysis(change_info)
         
         try:
-            # Подготовить промпт
-            user_prompt = self._create_analysis_prompt(change_info)
-            
+            # Подготовить контекст с реальными фрагментами кода
+            code_context = detector.prepare_llm_context(
+                change_info,
+                max_tokens=config.MAX_DIFF_TOKENS
+            )
+
+            # Передать code_context в промпт
+            user_prompt = self._create_analysis_prompt(change_info, code_context)
+
             logger.info(f"Отправка запроса в OpenAI для анализа: {change_info['url']}")
 
             # Применить rate limiting
@@ -187,25 +194,32 @@ class LLMAnalyzer:
             logger.error(f"Неожиданная ошибка при анализе через LLM: {e}", exc_info=True)
             return self._create_default_analysis(change_info)
     
-    def _create_analysis_prompt(self, change_info: Dict) -> str:
+    def _create_analysis_prompt(self, change_info: Dict, code_context: str = None) -> str:
         """
         Создать промпт для анализа с учетом категории файла
-        
+
         Args:
             change_info: Информация об изменении
-            
+            code_context: Подготовленный контекст с фрагментами кода (опционально)
+
         Returns:
             Текст промпта
         """
         stats = change_info['stats']
         category = change_info.get('category', 'unknown')
         priority = change_info.get('priority', 'MEDIUM')
-        
+
         # Получить контекст категории
         category_context = CATEGORY_CONTEXTS.get(category, "")
-        
-        # Форматировать статистику
-        change_stats = f"""- Добавлено строк: {stats['added_lines']}
+
+        # Если code_context не передан - использовать только статистику
+        if not code_context:
+            code_context = f"""Метаданные изменения:
+- Изменение размера файла: {change_info['size_diff']} байт
+- Процент изменения: {change_info['change_percent']}%
+
+Статистика:
+- Добавлено строк: {stats['added_lines']}
 - Удалено строк: {stats['removed_lines']}
 - Всего изменений: {stats['total_changes']}
 """
@@ -220,22 +234,37 @@ class LLMAnalyzer:
 Категория: {category}
 Приоритет: {priority}
 Тип файла: {change_info['file_type']}
-Размер изменения: {abs(change_info['size_diff'])} байт
 
-Метаданные изменения:
-- Изменение размера файла: {change_info['size_diff']} байт
-- Процент изменения: {change_info['change_percent']}%
-
-Статистика:
-{change_stats}
+{code_context}
 
 Задачи:
-1. Определи, что конкретно изменилось (новая функция, исправление бага, оптимизация, изменение API)
-2. Оцени значимость с учетом категории файла: КРИТИЧЕСКОЕ / ВАЖНОЕ / НЕЗНАЧИТЕЛЬНОЕ
-3. Опиши влияние на пользователей Tilda простым языком
-4. Дай рекомендации разработчикам (если нужны действия)
+1. Определи, что конкретно изменилось:
+   - Новая функция (укажи имя функции из кода)
+   - Исправление бага (опиши суть с примером)
+   - Оптимизация (что именно оптимизировано)
+   - Изменение API (какие методы/параметры изменились)
 
-ВАЖНО: Учитывай приоритет категории '{priority}' при определении severity.
+2. Оцени значимость с учетом категории '{category}' (приоритет: {priority}):
+   - КРИТИЧЕСКОЕ - поломка функционала, breaking changes в API
+   - ВАЖНОЕ - новая функция, значимое исправление
+   - НЕЗНАЧИТЕЛЬНОЕ - мелкие правки, форматирование
+
+3. Опиши влияние на пользователей Tilda простым языком:
+   - Что изменится в поведении сайта?
+   - Кого это затронет?
+   - Нужны ли действия от разработчиков?
+
+4. Дай рекомендации:
+   - Какие места на сайте проверить?
+   - Какие риски?
+   - Или "Действий не требуется"
+
+ВАЖНО:
+- Используй РЕАЛЬНЫЕ примеры из секции "Ключевые изменения в коде"
+- НЕ используй абстрактные формулировки
+- Если видишь конкретную функцию в коде - назови её
+- Если не понятно из минифицированного кода - честно признай: "Код минифицирован, детали требуют дополнительного анализа"
+- Анализируй до 50 фрагментов кода для максимальной точности
 
 Ответ СТРОГО в JSON формате:
 {{
