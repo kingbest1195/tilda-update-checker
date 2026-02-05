@@ -174,7 +174,7 @@ REQUEST_RETRY_DELAY = 5  # секунды
 USER_AGENT = "Mozilla/5.0 (compatible; TildaUpdateChecker/1.0)"
 
 # LLM Analysis Configuration
-MAX_DIFF_TOKENS = 5000  # Увеличено с 2000 до 5000 для подробного контекста
+MAX_DIFF_TOKENS = 10000  # Увеличено с 5000 до 10000 для детального контекста beautified кода
 MIN_CHANGE_SIZE = 10  # Минимальный размер изменения в байтах для анализа
 
 # Промпты для LLM

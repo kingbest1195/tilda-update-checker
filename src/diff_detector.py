@@ -70,7 +70,8 @@ class DiffDetector:
                 tracked_file.last_content,
                 new_content,
                 tracked_file.last_size,
-                new_size
+                new_size,
+                file_type
             )
             
             # Сохранить изменение в БД
@@ -112,45 +113,78 @@ class DiffDetector:
         logger.info(f"Всего обнаружено изменений: {len(changes)}")
         return changes
     
+    def _beautify_code(self, content: str, file_type: str) -> str:
+        """
+        Форматировать минифицированный код для лучшего diff
+
+        Args:
+            content: Исходный код
+            file_type: Тип файла (js/css)
+
+        Returns:
+            Отформатированный код
+        """
+        if file_type == 'js':
+            try:
+                import jsbeautifier
+                opts = jsbeautifier.default_options()
+                opts.indent_size = 2
+                opts.max_preserve_newlines = 2
+                return jsbeautifier.beautify(content, opts)
+            except Exception as e:
+                logger.warning(f"Не удалось beautify JS: {e}")
+                return content
+        return content  # CSS пока оставляем как есть
+
     def _analyze_change(self, old_content: str, new_content: str,
-                       old_size: int, new_size: int) -> Dict:
+                       old_size: int, new_size: int, file_type: str = 'js') -> Dict:
         """
         Проанализировать изменение
-        
+
         Args:
             old_content: Старое содержимое
             new_content: Новое содержимое
             old_size: Старый размер
             new_size: Новый размер
-            
+            file_type: Тип файла для beautify
+
         Returns:
             Словарь с информацией об изменении
         """
         # Вычислить процент изменения
         size_diff = abs(new_size - old_size)
         change_percent = int((size_diff / old_size * 100)) if old_size > 0 else 100
-        
+
         # Определить, значимое ли изменение
         is_significant = size_diff >= config.MIN_CHANGE_SIZE
-        
-        # Вычислить diff
-        old_lines = old_content.splitlines(keepends=True)
-        new_lines = new_content.splitlines(keepends=True)
-        
+
+        # Beautify для минифицированного кода (если меньше 10 строк - признак минификации)
+        old_content_formatted = old_content
+        new_content_formatted = new_content
+
+        if len(old_content.splitlines()) < 10:
+            logger.info("Обнаружен минифицированный код, применяю beautify...")
+            old_content_formatted = self._beautify_code(old_content, file_type)
+            new_content_formatted = self._beautify_code(new_content, file_type)
+
+        # Вычислить diff на форматированном коде
+        old_lines = old_content_formatted.splitlines(keepends=True)
+        new_lines = new_content_formatted.splitlines(keepends=True)
+
         diff = list(difflib.unified_diff(
             old_lines,
             new_lines,
             lineterm='',
-            n=0  # Контекст = 0 для минимального вывода
+            n=3  # Контекст = 3 для лучшего понимания изменений
         ))
-        
+
         # Статистика изменений
         added_lines = sum(1 for line in diff if line.startswith('+') and not line.startswith('+++'))
         removed_lines = sum(1 for line in diff if line.startswith('-') and not line.startswith('---'))
-        
+
         # Создать краткую сводку
         summary = self._create_summary(size_diff, added_lines, removed_lines, change_percent)
-        
+
         # Статистика для LLM
         stats = {
             'size_diff': size_diff,
@@ -159,15 +193,16 @@ class DiffDetector:
             'removed_lines': removed_lines,
             'total_changes': added_lines + removed_lines
         }
-        
+
         return {
             'summary': summary,
             'change_percent': change_percent,
             'is_significant': is_significant,
             'stats': stats,
-            'diff_lines': diff[:100],  # Ограничить количество строк
-            'old_content': old_content,  # Добавлен для prepare_llm_context
-            'new_content': new_content   # Добавлен для prepare_llm_context
+            'diff_lines': diff[:300],  # Увеличено с 100 до 300
+            'old_content': old_content,  # Оригинальный для сохранения
+            'new_content': new_content,  # Оригинальный для сохранения
+            'beautified_diff': '\n'.join(diff[:300]) if len(old_content.splitlines()) < 10 else None
         }
     
     def _create_summary(self, size_diff: int, added: int, removed: int,
@@ -237,6 +272,87 @@ class DiffDetector:
         
         return '\n'.join(changes)
     
+    def _extract_diff_metadata(self, diff_lines: List[str]) -> Dict:
+        """
+        Извлечь метаданные из diff (функции, параметры, условия)
+
+        Returns:
+            Словарь с метаданными:
+            - added_functions: Список добавленных функций
+            - removed_functions: Список удалённых функций
+            - modified_functions: Список изменённых функций
+            - param_changes: Изменения параметров функций
+            - condition_changes: Изменения условий
+        """
+        import re
+
+        metadata = {
+            'added_functions': [],
+            'removed_functions': [],
+            'modified_functions': [],
+            'param_changes': [],
+            'condition_changes': [],
+            'new_imports': [],
+            'removed_imports': []
+        }
+
+        # Регулярки для поиска функций
+        func_patterns = [
+            r'function\s+(\w+)\s*\(',           # function name(
+            r'(\w+):\s*function\s*\(',          # name: function(
+            r'const\s+(\w+)\s*=\s*function',    # const name = function
+            r'const\s+(\w+)\s*=\s*\([^)]*\)\s*=>', # const name = () =>
+        ]
+
+        for line in diff_lines:
+            if line.startswith('+') and not line.startswith('+++'):
+                clean_line = line[1:].strip()
+
+                # Поиск добавленных функций
+                for pattern in func_patterns:
+                    match = re.search(pattern, clean_line)
+                    if match:
+                        func_name = match.group(1)
+                        metadata['added_functions'].append(func_name)
+                        break
+
+                # Поиск новых import/require
+                if 'import' in clean_line or 'require(' in clean_line:
+                    metadata['new_imports'].append(clean_line[:100])
+
+                # Поиск изменений условий
+                if any(kw in clean_line for kw in ['if (', 'else if', 'switch', '&&', '||']):
+                    metadata['condition_changes'].append(('added', clean_line[:150]))
+
+            elif line.startswith('-') and not line.startswith('---'):
+                clean_line = line[1:].strip()
+
+                # Поиск удалённых функций
+                for pattern in func_patterns:
+                    match = re.search(pattern, clean_line)
+                    if match:
+                        func_name = match.group(1)
+                        metadata['removed_functions'].append(func_name)
+                        break
+
+                # Поиск удалённых import/require
+                if 'import' in clean_line or 'require(' in clean_line:
+                    metadata['removed_imports'].append(clean_line[:100])
+
+                # Поиск изменений условий
+                if any(kw in clean_line for kw in ['if (', 'else if', 'switch', '&&', '||']):
+                    metadata['condition_changes'].append(('removed', clean_line[:150]))
+
+        # Найти изменённые функции (функция есть и в added, и в removed)
+        common_funcs = set(metadata['added_functions']) & set(metadata['removed_functions'])
+        metadata['modified_functions'] = list(common_funcs)
+
+        # Убрать изменённые из added и removed
+        metadata['added_functions'] = [f for f in metadata['added_functions'] if f not in common_funcs]
+        metadata['removed_functions'] = [f for f in metadata['removed_functions'] if f not in common_funcs]
+
+        return metadata
+
     def prepare_llm_context(self, change_info: Dict, max_tokens: int = None) -> str:
         """
         Подготовить контекст для отправки в LLM с реальными фрагментами кода
@@ -266,21 +382,44 @@ class DiffDetector:
             ""
         ]
 
-        # Добавить фрагменты diff если доступны
+        # Извлечь метаданные из diff
         diff_lines = change_info.get('diff_lines', [])
+        metadata = self._extract_diff_metadata(diff_lines)
 
+        # Добавить метаданные в контекст
+        if any(metadata.values()):
+            context_parts.append("Обнаруженные структурные изменения:")
+
+            if metadata['added_functions']:
+                context_parts.append(f"  Добавлены функции: {', '.join(metadata['added_functions'][:10])}")
+
+            if metadata['removed_functions']:
+                context_parts.append(f"  Удалены функции: {', '.join(metadata['removed_functions'][:10])}")
+
+            if metadata['modified_functions']:
+                context_parts.append(f"  Изменены функции: {', '.join(metadata['modified_functions'][:10])}")
+
+            if metadata['new_imports']:
+                context_parts.append(f"  Новые зависимости: {len(metadata['new_imports'])} шт.")
+
+            if metadata['condition_changes']:
+                context_parts.append(f"  Изменения логики (if/else/switch): {len(metadata['condition_changes'])} шт.")
+
+            context_parts.append("")
+
+        # Добавить фрагменты diff если доступны
         if diff_lines:
             context_parts.append("Ключевые изменения в коде:")
             context_parts.append("```")
 
             # Извлечь только строки с изменениями (+ и -)
             code_changes = []
-            for line in diff_lines[:100]:  # Увеличено с 50 до 100 строк
+            for line in diff_lines[:300]:  # Увеличено с 100 до 300 строк
                 if line.startswith('+') and not line.startswith('+++'):
                     # Для минифицированного кода - разбить длинные строки
                     if len(line) > 200:
-                        # Разбить по точке с запятой, взять первые 5 фрагментов
-                        fragments = line[1:].split(';')[:5]
+                        # Разбить по точке с запятой, взять первые 15 фрагментов
+                        fragments = line[1:].split(';')[:15]
                         for frag in fragments:
                             if frag.strip():
                                 code_changes.append(f"+{frag.strip()};")
@@ -288,14 +427,14 @@ class DiffDetector:
                         code_changes.append(line)
                 elif line.startswith('-') and not line.startswith('---'):
                     if len(line) > 200:
-                        fragments = line[1:].split(';')[:5]
+                        fragments = line[1:].split(';')[:15]
                         for frag in fragments:
                             if frag.strip():
                                 code_changes.append(f"-{frag.strip()};")
                     else:
                         code_changes.append(line)
 
-            context_parts.extend(code_changes[:50])  # Топ 50 фрагментов (было 30)
+            context_parts.extend(code_changes[:150])  # Увеличено с 50 до 150 фрагментов
             context_parts.append("```")
 
         # Проверить лимит токенов

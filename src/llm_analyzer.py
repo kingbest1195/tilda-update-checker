@@ -224,7 +224,7 @@ class LLMAnalyzer:
 - Всего изменений: {stats['total_changes']}
 """
         
-        # Создать расширенный промпт с контекстом категории
+        # Создать расширенный промпт с контекстом категории и примерами
         prompt = f"""Проанализируй изменения в файле конструктора Tilda.
 
 КОНТЕКСТ КАТЕГОРИИ:
@@ -237,34 +237,92 @@ class LLMAnalyzer:
 
 {code_context}
 
+ПРИМЕРЫ ХОРОШИХ АНАЛИЗОВ:
+
+Пример 1 (новая функция):
+{{
+  "change_type": "Новая функция",
+  "severity": "ВАЖНОЕ",
+  "description": "Добавлена функция t_cart__validatePromoCode() для валидации промокодов. Функция проверяет формат кода, срок действия и применимость к товарам в корзине.",
+  "user_impact": "Пользователи смогут использовать промокоды при оформлении заказов. Требуется настройка промокодов в админке.",
+  "recommendations": "Проверьте работу оформления заказа с промокодами. Убедитесь, что скидки применяются корректно."
+}}
+
+Пример 2 (исправление бага):
+{{
+  "change_type": "Исправление бага",
+  "severity": "КРИТИЧЕСКОЕ",
+  "description": "Исправлен баг в функции t_members__checkSession(): раньше expiration time не учитывал timezone, из-за чего сессии истекали преждевременно.",
+  "user_impact": "Пользователи больше не будут внезапно разлогиниваться из личного кабинета. Исправлен критичный баг с авторизацией.",
+  "recommendations": "Проверьте работу авторизации на сайтах с Members Area. Убедитесь, что сессии не истекают раньше времени."
+}}
+
+Пример 3 (изменение API):
+{{
+  "change_type": "Breaking Change",
+  "severity": "КРИТИЧЕСКОЕ",
+  "description": "Изменён API функции t_cart__init(): удалён параметр 'autoOpen', добавлен новый параметр 'config' объект с настройками. Старый способ вызова больше не работает.",
+  "user_impact": "Кастомный код, использующий t_cart__init(true), сломается. Требуется обновление кастомного JS кода.",
+  "recommendations": "СРОЧНО: Проверьте все сайты с кастомным JS кодом для корзины. Обновите вызовы t_cart__init() на новый формат."
+}}
+
+Пример 4 (минифицированный код без понимания):
+{{
+  "change_type": "Обновление кода",
+  "severity": "ВАЖНОЕ",
+  "description": "Код минифицирован, детальный анализ затруднён. Обнаружены изменения в области обработки событий (видны вызовы addEventListener). Размер увеличился на 512 байт, что указывает на добавление новой логики.",
+  "user_impact": "Возможны улучшения в обработке пользовательских событий в Zero Block. Рекомендуется тестирование.",
+  "recommendations": "Проверьте работу интерактивных элементов в Zero блоках (кнопки, формы, ховер-эффекты)."
+}}
+
 Задачи:
 1. Определи, что конкретно изменилось:
-   - Новая функция (укажи имя функции из кода)
-   - Исправление бага (опиши суть с примером)
-   - Оптимизация (что именно оптимизировано)
-   - Изменение API (какие методы/параметры изменились)
+   - Новая функция → НАЗОВИ имя функции (ищи "function XXX(", "XXX: function", "const XXX =")
+   - Исправление бага → ОПИШИ суть с примером (ищи изменения в условиях if/else)
+   - Оптимизация → ЧТО именно оптимизировано (например: "убран лишний цикл", "кеширование результата")
+   - Изменение API → КАКИЕ методы/параметры изменились (сравни параметры функций в старом и новом коде)
+   - Breaking Change → КАКОЙ код сломается (укажи старый способ вызова и новый)
 
-2. Оцени значимость с учетом категории '{category}' (приоритет: {priority}):
-   - КРИТИЧЕСКОЕ - поломка функционала, breaking changes в API
-   - ВАЖНОЕ - новая функция, значимое исправление
-   - НЕЗНАЧИТЕЛЬНОЕ - мелкие правки, форматирование
+2. Найди ключевые индикаторы изменений:
+   - Добавлены функции: ищи "+ function XXX", "+ const XXX =", "+ XXX: function"
+   - Удалены функции: ищи "- function XXX"
+   - Изменены параметры: сравни "(param1, param2)" в старом и новом коде
+   - Изменены условия: ищи изменения в "if", "switch", "&&", "||"
+   - Новые зависимости: ищи новые "import", "require"
 
-3. Опиши влияние на пользователей Tilda простым языком:
-   - Что изменится в поведении сайта?
-   - Кого это затронет?
-   - Нужны ли действия от разработчиков?
+3. Оцени значимость с учетом категории '{category}' (приоритет: {priority}):
+   - КРИТИЧЕСКОЕ:
+     * Breaking changes (удалены функции, изменён API)
+     * Баги безопасности или потери данных
+     * Изменения в core функционале (формы, авторизация, оплата)
 
-4. Дай рекомендации:
-   - Какие места на сайте проверить?
-   - Какие риски?
-   - Или "Действий не требуется"
+   - ВАЖНОЕ:
+     * Новые функции или параметры
+     * Значимые исправления багов
+     * Изменения, требующие тестирования
+
+   - НЕЗНАЧИТЕЛЬНОЕ:
+     * Рефакторинг без изменения API
+     * Форматирование, комментарии
+     * Оптимизация без видимых изменений
+
+4. Опиши влияние на пользователей Tilda простым языком:
+   - ЧТО изменится в поведении сайта? (конкретные действия: "кнопка теперь X", "форма будет Y")
+   - КОГО это затронет? (все сайты / только с определёнными блоками / только с кастомным кодом)
+   - НУЖНЫ ли действия? (обновить код / проверить работу / ничего не делать)
+
+5. Дай рекомендации:
+   - КАКИЕ места на сайте проверить? (конкретные блоки, формы, страницы)
+   - КАКИЕ риски? (может сломаться X, если используется Y)
+   - Или "Действий не требуется" (если изменения не критичны)
 
 ВАЖНО:
 - Используй РЕАЛЬНЫЕ примеры из секции "Ключевые изменения в коде"
-- НЕ используй абстрактные формулировки
-- Если видишь конкретную функцию в коде - назови её
-- Если не понятно из минифицированного кода - честно признай: "Код минифицирован, детали требуют дополнительного анализа"
-- Анализируй до 50 фрагментов кода для максимальной точности
+- Ищи имена функций, параметры, условия в diff
+- Если видишь "function XXX(" или "XXX: function" - НАЗОВИ эту функцию
+- Если видишь новый параметр - УКАЖИ его
+- Если код минифицирован и неясен - используй формат как в Примере 4
+- НЕ используй абстрактные формулировки без деталей
 
 Ответ СТРОГО в JSON формате:
 {{
@@ -315,46 +373,96 @@ class LLMAnalyzer:
             logger.error(f"Ошибка при обработке ответа LLM: {e}", exc_info=True)
             return None
     
+    def _generate_user_impact(self, metadata: Dict, category: str) -> str:
+        """
+        Генерировать описание влияния на основе метаданных
+
+        Args:
+            metadata: Метаданные из diff
+            category: Категория файла
+
+        Returns:
+            Описание влияния на пользователей
+        """
+        if metadata.get('removed_functions'):
+            return f"Удалены функции. Возможны проблемы с совместимостью в категории '{category}'"
+
+        if metadata.get('added_functions'):
+            return f"Добавлена новая функциональность в категории '{category}'. Требуется тестирование."
+
+        if metadata.get('modified_functions'):
+            return f"Изменена существующая функциональность в категории '{category}'. Рекомендуется проверка."
+
+        return f'Возможны изменения в функциональности категории "{category}" конструктора Tilda'
+
     def _create_default_analysis(self, change_info: Dict) -> Dict:
         """
-        Создать анализ по умолчанию (fallback без LLM) с учетом категории
-        
+        Создать анализ по умолчанию (fallback без LLM) с использованием метаданных
+
         Args:
             change_info: Информация об изменении
-            
+
         Returns:
             Словарь с базовым анализом
         """
+        from src.diff_detector import detector
+
         size_diff = change_info['size_diff']
         change_percent = change_info['change_percent']
         category = change_info.get('category', 'unknown')
         priority = change_info.get('priority', 'MEDIUM')
-        
-        # Эвристика для определения severity на основе приоритета и процента изменения
-        if priority == 'CRITICAL':
-            if change_percent > 20:
-                severity = 'КРИТИЧЕСКОЕ'
-            elif change_percent > 5:
-                severity = 'ВАЖНОЕ'
-            else:
-                severity = 'ВАЖНОЕ'
-        elif priority == 'HIGH':
-            if change_percent > 30:
-                severity = 'КРИТИЧЕСКОЕ'
-            elif change_percent > 10:
-                severity = 'ВАЖНОЕ'
-            else:
+
+        # Извлечь метаданные из diff
+        diff_lines = change_info.get('diff_lines', [])
+        metadata = detector._extract_diff_metadata(diff_lines)
+
+        # Улучшенное описание на основе метаданных
+        description_parts = []
+
+        if metadata['added_functions']:
+            funcs = ', '.join(metadata['added_functions'][:3])
+            description_parts.append(f"Добавлены функции: {funcs}")
+
+        if metadata['removed_functions']:
+            funcs = ', '.join(metadata['removed_functions'][:3])
+            description_parts.append(f"Удалены функции: {funcs}")
+
+        if metadata['modified_functions']:
+            funcs = ', '.join(metadata['modified_functions'][:3])
+            description_parts.append(f"Изменены функции: {funcs}")
+
+        if metadata['new_imports']:
+            description_parts.append(f"Добавлены зависимости ({len(metadata['new_imports'])} шт.)")
+
+        if metadata['condition_changes']:
+            description_parts.append(f"Изменена логика выполнения ({len(metadata['condition_changes'])} условий)")
+
+        # Если метаданные не найдены - общее описание
+        if not description_parts:
+            direction = "увеличился" if size_diff > 0 else "уменьшился"
+            description_parts.append(
+                f"Файл {direction} на {abs(size_diff)} байт ({change_percent}%). "
+                f"Детальный анализ недоступен (LLM API не настроен)."
+            )
+
+        description = " ".join(description_parts)
+
+        # Определить severity на основе метаданных
+        if metadata['removed_functions']:
+            severity = 'КРИТИЧЕСКОЕ'  # Удаление функций - breaking change
+        elif metadata['added_functions'] or metadata['modified_functions']:
+            severity = 'ВАЖНОЕ'
+        else:
+            # Fallback к эвристике по приоритету
+            if priority == 'CRITICAL':
+                severity = 'ВАЖНОЕ' if change_percent > 5 else 'НЕЗНАЧИТЕЛЬНОЕ'
+            elif priority == 'HIGH':
+                severity = 'ВАЖНОЕ' if change_percent > 10 else 'НЕЗНАЧИТЕЛЬНОЕ'
+            elif priority == 'MEDIUM':
+                severity = 'ВАЖНОЕ' if change_percent > 50 else 'НЕЗНАЧИТЕЛЬНОЕ'
+            else:  # LOW
                 severity = 'НЕЗНАЧИТЕЛЬНОЕ'
-        elif priority == 'MEDIUM':
-            if change_percent > 50:
-                severity = 'ВАЖНОЕ'
-            else:
-                severity = 'НЕЗНАЧИТЕЛЬНОЕ'
-        else:  # LOW
-            severity = 'НЕЗНАЧИТЕЛЬНОЕ'
-        
-        direction = "увеличился" if size_diff > 0 else "уменьшился"
-        
+
         # Специфичные рекомендации для разных категорий
         recommendations_map = {
             'core': 'Рекомендуется проверить работу всех сайтов, особенно формы и базовый функционал',
@@ -364,9 +472,9 @@ class LLMAnalyzer:
             'ui_components': 'Проверьте работу затронутых UI компонентов',
             'utilities': 'Действий не требуется, изменения затрагивают вспомогательный функционал'
         }
-        
+
         recommendations = recommendations_map.get(category, 'Рекомендуется проверить работу сайтов после обновления')
-        
+
         return {
             'url': change_info['url'],
             'file_type': change_info['file_type'],
@@ -374,8 +482,8 @@ class LLMAnalyzer:
             'priority': priority,
             'change_type': 'Обновление кода',
             'severity': severity,
-            'description': f"Файл {direction} на {abs(size_diff)} байт ({change_percent}%). Категория: {category}.",
-            'user_impact': f'Возможны изменения в функциональности категории "{category}" конструктора Tilda',
+            'description': description,
+            'user_impact': self._generate_user_impact(metadata, category),
             'recommendations': recommendations,
             'change_info': change_info
         }
