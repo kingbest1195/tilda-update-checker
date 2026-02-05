@@ -346,29 +346,155 @@ def run_discovery_and_migrate():
         logger.info("\n" + "="*80)
         logger.info("🔍 ЗАПУСК ЕЖЕНЕДЕЛЬНОГО DISCOVERY MODE")
         logger.info("="*80)
-        
+
         # Запустить полный Discovery Mode
         result = discovery.run_full_discovery_with_version_check()
-        
+
         version_updates = result.get('version_updates', [])
-        
+        discovered_files = result.get('discovered_files', [])
+        new_files = result.get('new_files', [])
+
+        # Отправить Discovery отчет в Telegram
+        if notifier and notifier.enabled:
+            discovery_report = []
+
+            # Добавить новые файлы
+            for file in new_files:
+                discovery_report.append({
+                    'url': file.get('url'),
+                    'category': file.get('category', 'unknown'),
+                    'priority': file.get('priority', 'MEDIUM'),
+                    'status': 'Новый файл'
+                })
+
+            # Добавить обновления версий
+            for update in version_updates:
+                discovery_report.append({
+                    'url': update.get('new_url'),
+                    'category': update.get('category', 'unknown'),
+                    'priority': update.get('priority', 'MEDIUM'),
+                    'status': f"Обновление: {update.get('old_version', 'N/A')} → {update.get('new_version')}"
+                })
+
+            if discovery_report:
+                logger.info(f"📨 Отправка Discovery отчета: {len(discovery_report)} файлов")
+                success = notifier.send_discovery_report(discovery_report)
+                if success:
+                    logger.info("✅ Discovery отчет отправлен в Telegram")
+                else:
+                    logger.error(f"❌ Ошибка отправки Discovery отчета: {notifier.last_error}")
+
         if version_updates:
             logger.info(f"\n🆕 Обнаружено {len(version_updates)} обновлений версий")
             logger.info("Начало автоматической миграции...")
-            
+
             # Выполнить пакетную миграцию
             stats = manager.perform_batch_migration(version_updates, force=False)
-            
+
+            successful_migrations = stats.get('successful_migrations', [])
+            failed_migrations = stats.get('failed_migrations', [])
+
             logger.info(f"\n📊 Результаты миграции:")
             logger.info(f"   ✅ Успешно: {stats['successful']}")
             logger.info(f"   ❌ Неудачно: {stats['failed']}")
+
+            # Отправить дайджест миграций в Digest топик
+            if (successful_migrations or failed_migrations) and notifier and notifier.enabled:
+                digest_data = []
+
+                for migration in successful_migrations:
+                    digest_data.append({
+                        'title': f"Миграция {migration.get('base_name', 'Unknown')}",
+                        'severity': 'ВАЖНОЕ',
+                        'category': migration.get('category', 'unknown'),
+                        'priority': migration.get('priority', 'MEDIUM'),
+                        'description': f"Успешная миграция с версии {migration.get('old_version', 'N/A')} на {migration.get('new_version', 'N/A')}",
+                        'url': migration.get('new_url', 'N/A')
+                    })
+
+                for migration in failed_migrations:
+                    digest_data.append({
+                        'title': f"Ошибка миграции {migration.get('base_name', 'Unknown')}",
+                        'severity': 'КРИТИЧЕСКОЕ',
+                        'category': migration.get('category', 'unknown'),
+                        'priority': 'HIGH',
+                        'description': f"Не удалось мигрировать: {migration.get('error', 'Unknown error')[:100]}",
+                        'url': migration.get('new_url', 'N/A')
+                    })
+
+                if digest_data:
+                    logger.info("📨 Отправка дайджеста миграций")
+                    success = notifier.send_daily_digest(digest_data)
+                    if success:
+                        logger.info("✅ Дайджест миграций отправлен в Telegram")
+                    else:
+                        logger.error(f"❌ Ошибка отправки дайджеста миграций: {notifier.last_error}")
         else:
             logger.info("\n✅ Обновлений версий не обнаружено")
-        
+
         logger.info("="*80 + "\n")
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка в Discovery Mode: {e}", exc_info=True)
+
+
+def send_daily_digest_task():
+    """Отправить ежедневный дайджест всех анонсов за последние 24 часа"""
+    try:
+        logger.info("\n" + "="*80)
+        logger.info("📊 ОТПРАВКА ЕЖЕДНЕВНОГО ДАЙДЖЕСТА")
+        logger.info("="*80)
+
+        if not db.init_db():
+            logger.error("❌ Ошибка инициализации БД")
+            return
+
+        # Получить все анонсы за последние 24 часа
+        with db.get_session() as session:
+            from datetime import timedelta
+            from src.database import Announcement
+
+            yesterday = datetime.now() - timedelta(hours=24)
+            announcements_raw = session.query(Announcement).filter(
+                Announcement.generated_at >= yesterday
+            ).order_by(Announcement.generated_at.desc()).all()
+
+            if not announcements_raw:
+                logger.info("ℹ️ Нет анонсов за последние 24 часа")
+                logger.info("="*80 + "\n")
+                return
+
+            # Форматировать для telegram_notifier
+            digest_data = []
+            for ann in announcements_raw:
+                tracked_file = ann.change.file if ann.change else None
+                digest_data.append({
+                    'id': ann.id,
+                    'title': ann.title or 'Обновление файла',
+                    'severity': ann.severity or 'НЕЗНАЧИТЕЛЬНОЕ',
+                    'category': tracked_file.category if tracked_file else 'unknown',
+                    'priority': tracked_file.priority if tracked_file else 'MEDIUM',
+                    'description': ann.content[:150] if ann.content else 'Нет описания',
+                    'url': tracked_file.url if tracked_file else 'N/A',
+                    'created_at': ann.generated_at
+                })
+
+            logger.info(f"📨 Отправка дайджеста: {len(digest_data)} анонсов")
+
+            # Отправить в Telegram
+            if notifier and notifier.enabled:
+                success = notifier.send_daily_digest(digest_data)
+                if success:
+                    logger.info("✅ Дайджест успешно отправлен в Telegram")
+                else:
+                    logger.error(f"❌ Ошибка отправки дайджеста: {notifier.last_error}")
+            else:
+                logger.info("ℹ️ Telegram уведомления отключены")
+
+        logger.info("="*80 + "\n")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при отправке дайджеста: {e}", exc_info=True)
 
 
 def check_404_errors():
@@ -377,20 +503,40 @@ def check_404_errors():
         logger.info("\n" + "="*80)
         logger.info("⚠️ ПРОВЕРКА 404 ОШИБОК")
         logger.info("="*80)
-        
+
         files_with_404 = fetcher.check_404_errors()
-        
+
         if files_with_404:
             logger.warning(f"🔴 Обнаружено {len(files_with_404)} файлов с критическими 404")
+
+            # Сохранить информацию о 404 файлах для отчета
+            files_404_info = []
+            for file_entry in files_with_404:
+                files_404_info.append({
+                    'url': file_entry.get('url'),
+                    'category': file_entry.get('category', 'unknown'),
+                    'priority': file_entry.get('priority', 'MEDIUM'),
+                    'status': f"404 Error (последовательных: {file_entry.get('consecutive_404_count', 0)})"
+                })
+
             logger.info("Запуск Discovery Mode для поиска замены...")
-            
+
             # Запустить Discovery Mode для поиска новых версий
             run_discovery_and_migrate()
+
+            # Отправить отчет о найденных заменах в Discovery топик
+            if notifier and notifier.enabled and files_404_info:
+                logger.info("📨 Отправка отчета о замене 404 файлов")
+                success = notifier.send_discovery_report(files_404_info)
+                if success:
+                    logger.info("✅ Discovery отчет (404 замены) отправлен в Telegram")
+                else:
+                    logger.error(f"❌ Ошибка отправки Discovery отчета: {notifier.last_error}")
         else:
             logger.info("✅ Критических 404 ошибок не обнаружено")
-        
+
         logger.info("="*80 + "\n")
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка при проверке 404: {e}", exc_info=True)
 
@@ -449,11 +595,22 @@ def run_daemon():
             id='telegram_retry'
         )
 
+        # Задача 5: Ежедневный дайджест изменений (каждый день в 22:00)
+        scheduler.add_job(
+            send_daily_digest_task,
+            'cron',
+            hour=22,
+            minute=0,
+            id='daily_digest',
+            misfire_grace_time=3600
+        )
+
         logger.info(f"✅ Планировщик настроен:")
         logger.info(f"   - Проверка изменений: каждые {interval_hours or 1} час(ов)")
         logger.info(f"   - Discovery Mode: каждый понедельник в 9:00")
         logger.info(f"   - Проверка 404: ежедневно в 8:00")
         logger.info(f"   - Повтор Telegram: каждые 15 минут")
+        logger.info(f"   - Ежедневный дайджест: ежедневно в 22:00")
         logger.info("Нажмите Ctrl+C для остановки")
         logger.info("")
 
@@ -759,6 +916,80 @@ def handle_retry_telegram():
     retry_pending_telegrams()
 
 
+def test_telegram_topics():
+    """Тестирование всех Telegram топиков"""
+    logger.info("🧪 Тестирование Telegram топиков")
+
+    if not notifier or not notifier.enabled:
+        logger.error("❌ Telegram уведомления отключены")
+        print("\n❌ Telegram не настроен. Проверьте переменные окружения:\n")
+        print("   - TELEGRAM_BOT_TOKEN")
+        print("   - TELEGRAM_CHAT_ID")
+        print("   - TELEGRAM_THREAD_ID (опционально)")
+        print("   - TELEGRAM_ALERTS_THREAD_ID (опционально)")
+        print("   - TELEGRAM_DIGEST_THREAD_ID (опционально)")
+        print("   - TELEGRAM_DISCOVERY_THREAD_ID (опционально)\n")
+        return
+
+    print("\n" + "="*80)
+    print("🧪 ТЕСТИРОВАНИЕ TELEGRAM ТОПИКОВ")
+    print("="*80)
+
+    # Тест 1: General топик
+    print("\nТест 1/4: General топик (thread_id={})".format(notifier.thread_id or 'None'))
+    success_1 = notifier._send_message(
+        "🧪 **Тест General топика**\n\nЭто тестовое сообщение в основной топик для анонсов.",
+        thread_id=notifier.thread_id
+    )
+    print("   {}".format("✅ Отправлено" if success_1 else f"❌ Ошибка: {notifier.last_error}"))
+
+    # Тест 2: Alerts топик
+    print("\nТест 2/4: Alerts топик (thread_id={})".format(notifier.alerts_thread_id or 'None'))
+    success_2 = notifier._send_message(
+        "🧪 **Тест Alerts топика**\n\nЭто тестовое сообщение в топик для алертов о версиях и миграциях.",
+        thread_id=notifier.alerts_thread_id
+    )
+    print("   {}".format("✅ Отправлено" if success_2 else f"❌ Ошибка: {notifier.last_error}"))
+
+    # Тест 3: Digest топик
+    print("\nТест 3/4: Digest топик (thread_id={})".format(notifier.digest_thread_id or 'None'))
+    test_digest = [{
+        'title': 'Тестовый анонс',
+        'severity': 'ВАЖНОЕ',
+        'category': 'core',
+        'priority': 'HIGH',
+        'description': 'Это тестовое сообщение для проверки Digest топика',
+        'url': 'https://static.tildacdn.com/js/test.js',
+        'created_at': datetime.now()
+    }]
+    success_3 = notifier.send_daily_digest(test_digest)
+    print("   {}".format("✅ Отправлено" if success_3 else f"❌ Ошибка: {notifier.last_error}"))
+
+    # Тест 4: Discovery топик
+    print("\nТест 4/4: Discovery топик (thread_id={})".format(notifier.discovery_thread_id or 'None'))
+    test_discovery = [{
+        'url': 'https://static.tildacdn.com/js/test-discovery-1.0.min.js',
+        'category': 'core',
+        'priority': 'HIGH',
+        'status': 'Тестовый файл для проверки Discovery топика'
+    }]
+    success_4 = notifier.send_discovery_report(test_discovery)
+    print("   {}".format("✅ Отправлено" if success_4 else f"❌ Ошибка: {notifier.last_error}"))
+
+    print("\n" + "="*80)
+    print("📊 РЕЗУЛЬТАТЫ ТЕСТИРОВАНИЯ")
+    print("="*80)
+    successful = sum([success_1, success_2, success_3, success_4])
+    print(f"✅ Успешно: {successful}/4")
+    print(f"❌ Неудачно: {4 - successful}/4")
+    print("="*80 + "\n")
+
+    if successful == 4:
+        print("🎉 Все топики работают корректно!\n")
+    else:
+        print("⚠️ Некоторые топики недоступны. Проверьте логи выше.\n")
+
+
 def main():
     """Главная функция"""
     parser = argparse.ArgumentParser(
@@ -783,6 +1014,7 @@ def main():
   # Telegram команды
   %(prog)s --telegram-status                # Статистика Telegram отправок
   %(prog)s --retry-telegram                 # Повторить неудачные отправки
+  %(prog)s --test-telegram-topics           # Тестировать все Telegram топики
         """
     )
     
@@ -871,6 +1103,12 @@ def main():
         help="Вручную повторить отправку неудачных Telegram сообщений"
     )
 
+    parser.add_argument(
+        "--test-telegram-topics",
+        action="store_true",
+        help="Тестировать все Telegram топики (General, Alerts, Digest, Discovery)"
+    )
+
     # Дополнительные параметры
     parser.add_argument(
         "-n", "--number",
@@ -917,6 +1155,8 @@ def main():
         show_telegram_status()
     elif args.retry_telegram:
         handle_retry_telegram()
+    elif args.test_telegram_topics:
+        test_telegram_topics()
     else:
         parser.print_help()
         print("\n⚠️ Укажите команду для выполнения\n")

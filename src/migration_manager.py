@@ -297,44 +297,73 @@ class MigrationManager:
             
             return False
     
-    def perform_batch_migration(self, updates: List[Dict], force: bool = False) -> Dict[str, int]:
+    def perform_batch_migration(self, updates: List[Dict], force: bool = False) -> Dict:
         """
         Выполнить пакетную миграцию нескольких файлов
-        
+
         Args:
             updates: Список обновлений для миграции
             force: Принудительная миграция
-            
+
         Returns:
-            Статистика: {'successful': N, 'failed': M, 'skipped': K}
+            Статистика: {
+                'successful': N,
+                'failed': M,
+                'skipped': K,
+                'successful_migrations': List[Dict],
+                'failed_migrations': List[Dict]
+            }
         """
-        stats = {'successful': 0, 'failed': 0, 'skipped': 0}
-        
+        stats = {
+            'successful': 0,
+            'failed': 0,
+            'skipped': 0,
+            'successful_migrations': [],
+            'failed_migrations': []
+        }
+
         logger.info(f"\n{'='*80}")
         logger.info(f"🔄 ПАКЕТНАЯ МИГРАЦИЯ: {len(updates)} файлов")
         logger.info(f"{'='*80}\n")
-        
+
         # Сортировка по приоритету
         priority_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM': 2, 'LOW': 3}
         sorted_updates = sorted(
             updates,
             key=lambda x: priority_order.get(x.get('priority', 'MEDIUM'), 99)
         )
-        
+
         for i, update in enumerate(sorted_updates, 1):
             logger.info(f"\n[{i}/{len(updates)}] Миграция: {update['base_name']}")
-            
+
             success = self.perform_migration(update, force=force)
-            
+
             if success:
                 stats['successful'] += 1
+                stats['successful_migrations'].append({
+                    'base_name': update.get('base_name'),
+                    'old_version': update.get('old_version'),
+                    'new_version': update.get('new_version'),
+                    'category': update.get('category'),
+                    'priority': update.get('priority'),
+                    'new_url': update.get('new_url')
+                })
             else:
                 stats['failed'] += 1
-            
+                stats['failed_migrations'].append({
+                    'base_name': update.get('base_name'),
+                    'old_version': update.get('old_version'),
+                    'new_version': update.get('new_version'),
+                    'category': update.get('category'),
+                    'priority': update.get('priority'),
+                    'new_url': update.get('new_url'),
+                    'error': 'Migration failed'
+                })
+
             # Небольшая задержка между миграциями
             if i < len(sorted_updates):
                 time.sleep(2)
-        
+
         logger.info(f"\n{'='*80}")
         logger.info(f"📊 ИТОГИ ПАКЕТНОЙ МИГРАЦИИ")
         logger.info(f"{'='*80}")
@@ -342,7 +371,7 @@ class MigrationManager:
         logger.info(f"❌ Неудачно: {stats['failed']}")
         logger.info(f"⏭ Пропущено: {stats['skipped']}")
         logger.info(f"{'='*80}\n")
-        
+
         return stats
     
     def rollback_to_version(self, base_name: str, version: str) -> bool:
