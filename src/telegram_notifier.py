@@ -252,7 +252,15 @@ class TelegramNotifier:
 ━━━━━━━━━━━━━━━━
 🔗 Файл: `{announcement.get('url', 'N/A')}`
 """
-        
+
+        # Добавить тренд и фичу если есть
+        trend = announcement.get('trend')
+        feature = announcement.get('feature')
+        if trend:
+            message += f"\n📈 **Тренд:** {trend}"
+        if feature:
+            message += f"\n🎯 **Фича:** {feature}"
+
         return message
     
     def _format_digest(self, announcements: List[Dict]) -> str:

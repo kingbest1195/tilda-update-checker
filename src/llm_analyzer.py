@@ -224,6 +224,33 @@ class LLMAnalyzer:
 - Всего изменений: {stats['total_changes']}
 """
         
+        # Секция истории изменений
+        history_section = ""
+        history = change_info.get('history', [])
+        if history:
+            history_lines = ["ИСТОРИЯ ИЗМЕНЕНИЙ ЭТОГО ФАЙЛА:"]
+            for h in history[:5]:
+                date_str = h.get('detected_at', 'N/A')
+                if hasattr(date_str, 'strftime'):
+                    date_str = date_str.strftime('%Y-%m-%d')
+                pct = h.get('change_percent', 0)
+                sev = h.get('severity', '')
+                desc = h.get('description', '')[:80]
+                history_lines.append(f"- {date_str}: изменение {pct}%, {sev}. {desc}")
+            history_section = "\n".join(history_lines) + "\n"
+
+        # Секция одновременных изменений
+        concurrent_section = ""
+        concurrent = change_info.get('concurrent_changes', [])
+        if concurrent:
+            concurrent_lines = ["ОДНОВРЕМЕННО ИЗМЕНЁННЫЕ ФАЙЛЫ:"]
+            for c in concurrent[:5]:
+                fname = c.get('filename', c.get('url', 'N/A'))
+                pct = c.get('change_percent', 0)
+                concurrent_lines.append(f"- {fname}: изменение {pct}%")
+            concurrent_lines.append("→ Если файлы связаны — это координированное обновление, опиши общий тренд.")
+            concurrent_section = "\n".join(concurrent_lines) + "\n"
+
         # Создать расширенный промпт с контекстом категории и примерами
         prompt = f"""Проанализируй изменения в файле конструктора Tilda.
 
@@ -237,100 +264,43 @@ class LLMAnalyzer:
 
 {code_context}
 
-ПРИМЕРЫ ХОРОШИХ АНАЛИЗОВ:
-
-Пример 1 (новая функция):
-{{
-  "change_type": "Новая функция",
-  "severity": "ВАЖНОЕ",
-  "description": "Добавлена функция t_cart__validatePromoCode() для валидации промокодов. Функция проверяет формат кода, срок действия и применимость к товарам в корзине.",
-  "user_impact": "Пользователи смогут использовать промокоды при оформлении заказов. Требуется настройка промокодов в админке.",
-  "recommendations": "Проверьте работу оформления заказа с промокодами. Убедитесь, что скидки применяются корректно."
-}}
-
-Пример 2 (исправление бага):
-{{
-  "change_type": "Исправление бага",
-  "severity": "КРИТИЧЕСКОЕ",
-  "description": "Исправлен баг в функции t_members__checkSession(): раньше expiration time не учитывал timezone, из-за чего сессии истекали преждевременно.",
-  "user_impact": "Пользователи больше не будут внезапно разлогиниваться из личного кабинета. Исправлен критичный баг с авторизацией.",
-  "recommendations": "Проверьте работу авторизации на сайтах с Members Area. Убедитесь, что сессии не истекают раньше времени."
-}}
-
-Пример 3 (изменение API):
-{{
-  "change_type": "Breaking Change",
-  "severity": "КРИТИЧЕСКОЕ",
-  "description": "Изменён API функции t_cart__init(): удалён параметр 'autoOpen', добавлен новый параметр 'config' объект с настройками. Старый способ вызова больше не работает.",
-  "user_impact": "Кастомный код, использующий t_cart__init(true), сломается. Требуется обновление кастомного JS кода.",
-  "recommendations": "СРОЧНО: Проверьте все сайты с кастомным JS кодом для корзины. Обновите вызовы t_cart__init() на новый формат."
-}}
-
-Пример 4 (минифицированный код без понимания):
-{{
-  "change_type": "Обновление кода",
-  "severity": "ВАЖНОЕ",
-  "description": "Код минифицирован, детальный анализ затруднён. Обнаружены изменения в области обработки событий (видны вызовы addEventListener). Размер увеличился на 512 байт, что указывает на добавление новой логики.",
-  "user_impact": "Возможны улучшения в обработке пользовательских событий в Zero Block. Рекомендуется тестирование.",
-  "recommendations": "Проверьте работу интерактивных элементов в Zero блоках (кнопки, формы, ховер-эффекты)."
-}}
-
+{history_section}
+{concurrent_section}
 Задачи:
-1. Определи, что конкретно изменилось:
-   - Новая функция → НАЗОВИ имя функции (ищи "function XXX(", "XXX: function", "const XXX =")
-   - Исправление бага → ОПИШИ суть с примером (ищи изменения в условиях if/else)
-   - Оптимизация → ЧТО именно оптимизировано (например: "убран лишний цикл", "кеширование результата")
-   - Изменение API → КАКИЕ методы/параметры изменились (сравни параметры функций в старом и новом коде)
-   - Breaking Change → КАКОЙ код сломается (укажи старый способ вызова и новый)
+1. Определи БИЗНЕС-СМЫСЛ изменений:
+   - Какую фичу Tilda разрабатывает?
+   - Какой тренд это отражает?
+   - Как это повлияет на владельцев сайтов?
 
-2. Найди ключевые индикаторы изменений:
-   - Добавлены функции: ищи "+ function XXX", "+ const XXX =", "+ XXX: function"
-   - Удалены функции: ищи "- function XXX"
-   - Изменены параметры: сравни "(param1, param2)" в старом и новом коде
-   - Изменены условия: ищи изменения в "if", "switch", "&&", "||"
-   - Новые зависимости: ищи новые "import", "require"
+2. Найди технические детали:
+   - Добавлены/удалены/изменены функции (ищи "function XXX(", "XXX: function", "const XXX =")
+   - Изменены параметры, условия (if/else/switch)
+   - Новые зависимости (import, require)
 
 3. Оцени значимость с учетом категории '{category}' (приоритет: {priority}):
-   - КРИТИЧЕСКОЕ:
-     * Breaking changes (удалены функции, изменён API)
-     * Баги безопасности или потери данных
-     * Изменения в core функционале (формы, авторизация, оплата)
+   - КРИТИЧЕСКОЕ: Breaking changes, баги безопасности, изменения core функционала
+   - ВАЖНОЕ: Новые функции, значимые исправления, требующие тестирования
+   - НЕЗНАЧИТЕЛЬНОЕ: Рефакторинг, форматирование, оптимизация без видимых изменений
 
-   - ВАЖНОЕ:
-     * Новые функции или параметры
-     * Значимые исправления багов
-     * Изменения, требующие тестирования
+4. Если есть история изменений — определи тренд (активная разработка, серия фиксов и т.д.)
 
-   - НЕЗНАЧИТЕЛЬНОЕ:
-     * Рефакторинг без изменения API
-     * Форматирование, комментарии
-     * Оптимизация без видимых изменений
-
-4. Опиши влияние на пользователей Tilda простым языком:
-   - ЧТО изменится в поведении сайта? (конкретные действия: "кнопка теперь X", "форма будет Y")
-   - КОГО это затронет? (все сайты / только с определёнными блоками / только с кастомным кодом)
-   - НУЖНЫ ли действия? (обновить код / проверить работу / ничего не делать)
-
-5. Дай рекомендации:
-   - КАКИЕ места на сайте проверить? (конкретные блоки, формы, страницы)
-   - КАКИЕ риски? (может сломаться X, если используется Y)
-   - Или "Действий не требуется" (если изменения не критичны)
+5. Если несколько файлов одной категории изменились одновременно — опиши координированное обновление.
 
 ВАЖНО:
-- Используй РЕАЛЬНЫЕ примеры из секции "Ключевые изменения в коде"
-- Ищи имена функций, параметры, условия в diff
-- Если видишь "function XXX(" или "XXX: function" - НАЗОВИ эту функцию
-- Если видишь новый параметр - УКАЖИ его
-- Если код минифицирован и неясен - используй формат как в Примере 4
+- Фокус на БИЗНЕС-СМЫСЛЕ, а не на технических деталях
+- Называй функции, но в контексте бизнес-значения
+- Если код минифицирован и неясен — честно предложи гипотезу
 - НЕ используй абстрактные формулировки без деталей
 
 Ответ СТРОГО в JSON формате:
 {{
-  "change_type": "тип изменения",
+  "change_type": "Новая фича / Улучшение / Исправление / Рефакторинг / Breaking Change",
   "severity": "КРИТИЧЕСКОЕ/ВАЖНОЕ/НЕЗНАЧИТЕЛЬНОЕ",
-  "description": "краткое описание изменений",
-  "user_impact": "влияние на пользователей",
-  "recommendations": "рекомендации или 'Действий не требуется'"
+  "description": "2-3 предложения: бизнес-смысл + технические детали",
+  "user_impact": "что конкретно изменится для владельца сайта на Tilda",
+  "recommendations": "конкретные действия или 'Действий не требуется'",
+  "trend": "гипотеза о тренде развития (или null если нет контекста)",
+  "feature": "предположение о разрабатываемой фиче (или null если неясно)"
 }}
 """
         
@@ -362,7 +332,11 @@ class LLMAnalyzer:
             if severity not in ['КРИТИЧЕСКОЕ', 'ВАЖНОЕ', 'НЕЗНАЧИТЕЛЬНОЕ']:
                 logger.warning(f"Некорректное значение severity: {severity}, использую 'ВАЖНОЕ'")
                 data['severity'] = 'ВАЖНОЕ'
-            
+
+            # Опциональные поля trend и feature (дефолт None)
+            data.setdefault('trend', None)
+            data.setdefault('feature', None)
+
             return data
             
         except json.JSONDecodeError as e:
@@ -397,7 +371,8 @@ class LLMAnalyzer:
 
     def _create_default_analysis(self, change_info: Dict) -> Dict:
         """
-        Создать анализ по умолчанию (fallback без LLM) с использованием метаданных
+        Создать анализ по умолчанию (fallback без LLM) с использованием метаданных,
+        исторического контекста и cross-file корреляции.
 
         Args:
             change_info: Информация об изменении
@@ -411,56 +386,93 @@ class LLMAnalyzer:
         change_percent = change_info['change_percent']
         category = change_info.get('category', 'unknown')
         priority = change_info.get('priority', 'MEDIUM')
+        file_type = change_info.get('file_type', 'js')
 
         # Извлечь метаданные из diff
         diff_lines = change_info.get('diff_lines', [])
-        metadata = detector._extract_diff_metadata(diff_lines)
+        metadata = detector._extract_diff_metadata(diff_lines, file_type=file_type)
 
         # Улучшенное описание на основе метаданных
         description_parts = []
 
         if metadata['added_functions']:
             funcs = ', '.join(metadata['added_functions'][:3])
-            description_parts.append(f"Добавлены функции: {funcs}")
+            description_parts.append(f"Добавлены функции: {funcs}.")
 
         if metadata['removed_functions']:
             funcs = ', '.join(metadata['removed_functions'][:3])
-            description_parts.append(f"Удалены функции: {funcs}")
+            description_parts.append(f"Удалены функции: {funcs}.")
 
         if metadata['modified_functions']:
             funcs = ', '.join(metadata['modified_functions'][:3])
-            description_parts.append(f"Изменены функции: {funcs}")
+            description_parts.append(f"Изменены функции: {funcs}.")
 
         if metadata['new_imports']:
-            description_parts.append(f"Добавлены зависимости ({len(metadata['new_imports'])} шт.)")
+            description_parts.append(f"Добавлены зависимости ({len(metadata['new_imports'])} шт.).")
 
         if metadata['condition_changes']:
-            description_parts.append(f"Изменена логика выполнения ({len(metadata['condition_changes'])} условий)")
+            description_parts.append(f"Изменена логика выполнения ({len(metadata['condition_changes'])} условий).")
 
-        # Если метаданные не найдены - общее описание
+        # CSS-специфичные метаданные
+        if metadata.get('css_selectors_added'):
+            sels = ', '.join(metadata['css_selectors_added'][:5])
+            description_parts.append(f"Добавлены CSS-селекторы: {sels}.")
+
+        if metadata.get('css_selectors_removed'):
+            sels = ', '.join(metadata['css_selectors_removed'][:5])
+            description_parts.append(f"Удалены CSS-селекторы: {sels}.")
+
+        # Если метаданные не найдены — бизнес-гипотеза по категории
         if not description_parts:
+            category_hypotheses = {
+                'core': 'Обновление ядра Tilda. Возможны изменения в базовом фреймворке, инициализации страниц или обработке форм.',
+                'members': 'Обновление системы личных кабинетов. Возможны изменения в авторизации, профилях или подписках.',
+                'ecommerce': 'Обновление модуля магазина. Возможны изменения в корзине, каталоге, оплате или системе скидок.',
+                'zero_block': 'Обновление редактора Zero Block. Возможны изменения в рендеринге, адаптивности или анимациях.',
+                'ui_components': 'Обновление UI-компонентов. Возможны изменения в виджетах, меню, попапах или слайдерах.',
+                'utilities': 'Обновление утилит. Возможны изменения в масках ввода, аналитике или обработке ошибок.',
+            }
             direction = "увеличился" if size_diff > 0 else "уменьшился"
+            hypothesis = category_hypotheses.get(category, 'Обновление файла Tilda.')
             description_parts.append(
-                f"Файл {direction} на {abs(size_diff)} байт ({change_percent}%). "
-                f"Детальный анализ недоступен (LLM API не настроен)."
+                f"Файл {direction} на {abs(size_diff)} байт ({change_percent}%). {hypothesis}"
             )
+
+        # Исторический контекст
+        history = change_info.get('history', [])
+        trend = None
+        feature = None
+        if history:
+            update_count = len(history)
+            description_parts.append(f"Это {update_count + 1}-е обновление файла. Файл активно развивается.")
+            if update_count >= 3:
+                trend = f"Активная разработка: {update_count + 1} обновлений. Направление: {category}"
+
+        # Cross-file контекст
+        concurrent = change_info.get('concurrent_changes', [])
+        # Исключить текущий файл из списка одновременных
+        current_url = change_info.get('url', '')
+        other_concurrent = [c for c in concurrent if c.get('url') != current_url]
+        if other_concurrent:
+            filenames = [c.get('filename', 'N/A') for c in other_concurrent[:3]]
+            description_parts.append(f"Координированное обновление: одновременно изменились {', '.join(filenames)}.")
+            feature = f"Комплексное обновление подсистемы {category}"
 
         description = " ".join(description_parts)
 
         # Определить severity на основе метаданных
-        if metadata['removed_functions']:
-            severity = 'КРИТИЧЕСКОЕ'  # Удаление функций - breaking change
-        elif metadata['added_functions'] or metadata['modified_functions']:
+        if metadata['removed_functions'] or metadata.get('css_selectors_removed'):
+            severity = 'КРИТИЧЕСКОЕ'
+        elif metadata['added_functions'] or metadata['modified_functions'] or metadata.get('css_selectors_added'):
             severity = 'ВАЖНОЕ'
         else:
-            # Fallback к эвристике по приоритету
             if priority == 'CRITICAL':
                 severity = 'ВАЖНОЕ' if change_percent > 5 else 'НЕЗНАЧИТЕЛЬНОЕ'
             elif priority == 'HIGH':
                 severity = 'ВАЖНОЕ' if change_percent > 10 else 'НЕЗНАЧИТЕЛЬНОЕ'
             elif priority == 'MEDIUM':
                 severity = 'ВАЖНОЕ' if change_percent > 50 else 'НЕЗНАЧИТЕЛЬНОЕ'
-            else:  # LOW
+            else:
                 severity = 'НЕЗНАЧИТЕЛЬНОЕ'
 
         # Специфичные рекомендации для разных категорий
@@ -485,9 +497,93 @@ class LLMAnalyzer:
             'description': description,
             'user_impact': self._generate_user_impact(metadata, category),
             'recommendations': recommendations,
+            'trend': trend,
+            'feature': feature,
             'change_info': change_info
         }
     
+    def analyze_batch(self, analysis_results: list) -> Optional[Dict]:
+        """
+        Batch-анализ трендов: если 2+ файла одной категории изменились,
+        определить общий тренд и фичу.
+
+        Args:
+            analysis_results: Список результатов индивидуальных анализов
+
+        Returns:
+            Словарь {category: {trend, feature, context}} или None
+        """
+        if not self.client or len(analysis_results) < 2:
+            return None
+
+        # Группировать по категориям
+        by_category = {}
+        for result in analysis_results:
+            cat = result.get('change_info', {}).get('category', 'unknown')
+            if cat not in by_category:
+                by_category[cat] = []
+            by_category[cat].append(result)
+
+        # Отфильтровать категории с 2+ изменениями
+        multi_change_categories = {cat: items for cat, items in by_category.items() if len(items) >= 2}
+
+        if not multi_change_categories:
+            return None
+
+        batch_results = {}
+
+        for category, items in multi_change_categories.items():
+            # Собрать описания для промпта
+            descriptions = []
+            for item in items:
+                url = item.get('url', 'N/A')
+                filename = url.split('/')[-1] if url else 'N/A'
+                desc = item.get('description', 'Нет описания')
+                descriptions.append(f"- {filename}: {desc}")
+
+            descriptions_text = "\n".join(descriptions)
+
+            prompt = f"""Эти {len(items)} файла категории "{category}" изменились одновременно:
+
+{descriptions_text}
+
+Ответь в JSON:
+{{
+  "trend": "общий тренд развития этой подсистемы Tilda",
+  "feature": "какую фичу Tilda вероятно разрабатывает",
+  "context": "краткое пояснение связи между изменениями"
+}}"""
+
+            try:
+                self._wait_for_rate_limit()
+
+                response = self.client.chat.completions.create(
+                    model=config.OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": config.SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=config.OPENAI_TEMPERATURE,
+                    max_tokens=500
+                )
+
+                content = response.choices[0].message.content
+                data = json.loads(content)
+                batch_results[category] = {
+                    'trend': data.get('trend'),
+                    'feature': data.get('feature'),
+                    'context': data.get('context'),
+                }
+
+                logger.info(f"Batch-анализ для {category}: trend='{data.get('trend', 'N/A')}'")
+
+            except Exception as e:
+                logger.warning(f"Ошибка batch-анализа для {category}: {e}")
+                continue
+
+        return batch_results if batch_results else None
+
     def estimate_tokens(self, text: str) -> int:
         """
         Оценить количество токенов в тексте

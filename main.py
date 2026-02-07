@@ -137,11 +137,18 @@ def check_and_analyze():
             return
         
         logger.info(f"🔍 Обнаружено изменений: {len(changes)}")
-        
+
+        # 2.5 Обогатить change_info историей и cross-file данными
+        for change in changes:
+            change['history'] = db.get_change_history(change['file_id'], limit=5)
+            change['concurrent_changes'] = db.get_recent_changes_by_category(
+                change['category'], hours=4
+            )
+
         # 3. Проанализировать через LLM (только значимые изменения)
         logger.info("Шаг 3: Анализ изменений через LLM...")
         analysis_results = []
-        
+
         for change in changes:
             if change.get('is_significant'):
                 logger.info(f"Анализ: {change['url']}")
@@ -160,7 +167,17 @@ def check_and_analyze():
             logger.warning("Нет результатов анализа для создания анонса")
             logger.info("=" * 80)
             return
-        
+
+        # 3.5 Batch-анализ трендов (если 2+ файла одной категории)
+        batch_analysis = analyzer.analyze_batch(analysis_results)
+        if batch_analysis:
+            logger.info(f"📊 Batch-анализ трендов: {len(batch_analysis)} категорий")
+            for result in analysis_results:
+                cat = result.get('change_info', {}).get('category')
+                if cat and cat in batch_analysis:
+                    result['trend'] = batch_analysis[cat].get('trend')
+                    result['feature'] = batch_analysis[cat].get('feature')
+
         # 4. Сгенерировать и сохранить анонсы
         logger.info("Шаг 4: Генерация анонсов...")
         announcement_ids = generator.save_announcements(analysis_results)
@@ -213,7 +230,9 @@ def check_and_analyze():
                     'user_impact': result.get('user_impact', ''),
                     'recommendations': result.get('recommendations', ''),
                     'priority': change_info.get('priority', 'MEDIUM'),
-                    'category': change_info.get('category', 'unknown')
+                    'category': change_info.get('category', 'unknown'),
+                    'trend': result.get('trend'),
+                    'feature': result.get('feature'),
                 }
 
                 # Попытка отправки

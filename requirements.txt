@@ -6,3 +6,4 @@ python-dotenv>=1.0.0
 packaging>=23.0
 beautifulsoup4>=4.12.0
 jsbeautifier==1.15.4
+cssbeautifier==1.15.4

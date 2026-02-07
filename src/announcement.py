@@ -104,6 +104,9 @@ class AnnouncementGenerator:
             'НЕЗНАЧИТЕЛЬНОЕ': '🟢'
         }.get(severity, '⚪')
         
+        trend = result.get('trend')
+        feature = result.get('feature')
+
         # Форматировать текст с отступами
         lines = [
             f"{index}. {filename}",
@@ -115,10 +118,17 @@ class AnnouncementGenerator:
             f"   Влияние: {user_impact}",
             f"",
             f"   Рекомендации: {recommendations}",
-            f"",
-            f"   Ссылка: {url}"
         ]
-        
+
+        if trend:
+            lines.append(f"")
+            lines.append(f"   Тренд: {trend}")
+        if feature:
+            lines.append(f"   Фича: {feature}")
+
+        lines.append(f"")
+        lines.append(f"   Ссылка: {url}")
+
         return "\n".join(lines)
     
     def save_announcements(self, analysis_results: List[Dict]) -> List[int]:

@@ -107,7 +107,11 @@ class DiffDetector:
                 'change_percent': change_info['change_percent'],
                 'is_significant': change_info['is_significant'],
                 'summary': change_info['summary'],
-                'stats': change_info['stats']
+                'stats': change_info['stats'],
+                'diff_lines': change_info.get('diff_lines', []),
+                'old_content': change_info.get('old_content', ''),
+                'new_content': change_info.get('new_content', ''),
+                'beautified_diff': change_info.get('beautified_diff'),
             })
         
         logger.info(f"Всего обнаружено изменений: {len(changes)}")
@@ -134,7 +138,28 @@ class DiffDetector:
             except Exception as e:
                 logger.warning(f"Не удалось beautify JS: {e}")
                 return content
-        return content  # CSS пока оставляем как есть
+        elif file_type == 'css':
+            try:
+                import cssbeautifier
+                opts = cssbeautifier.default_options()
+                opts.indent_size = 2
+                return cssbeautifier.beautify(content, opts)
+            except ImportError:
+                logger.debug("cssbeautifier не установлен, используем regex fallback для CSS")
+            except Exception as e:
+                logger.warning(f"Не удалось beautify CSS через cssbeautifier: {e}")
+
+            # Regex fallback для CSS
+            try:
+                import re
+                content = re.sub(r'\{', ' {\n  ', content)
+                content = re.sub(r'\}', '\n}\n', content)
+                content = re.sub(r';', ';\n  ', content)
+                return content
+            except Exception:
+                pass
+
+        return content
 
     def _analyze_change(self, old_content: str, new_content: str,
                        old_size: int, new_size: int, file_type: str = 'js') -> Dict:
@@ -272,17 +297,16 @@ class DiffDetector:
         
         return '\n'.join(changes)
     
-    def _extract_diff_metadata(self, diff_lines: List[str]) -> Dict:
+    def _extract_diff_metadata(self, diff_lines: List[str], file_type: str = 'js') -> Dict:
         """
-        Извлечь метаданные из diff (функции, параметры, условия)
+        Извлечь метаданные из diff (функции, параметры, условия, CSS селекторы)
+
+        Args:
+            diff_lines: Строки diff
+            file_type: Тип файла ('js' или 'css')
 
         Returns:
-            Словарь с метаданными:
-            - added_functions: Список добавленных функций
-            - removed_functions: Список удалённых функций
-            - modified_functions: Список изменённых функций
-            - param_changes: Изменения параметров функций
-            - condition_changes: Изменения условий
+            Словарь с метаданными
         """
         import re
 
@@ -293,7 +317,11 @@ class DiffDetector:
             'param_changes': [],
             'condition_changes': [],
             'new_imports': [],
-            'removed_imports': []
+            'removed_imports': [],
+            'css_selectors_added': [],
+            'css_selectors_removed': [],
+            'css_properties_added': [],
+            'css_properties_removed': [],
         }
 
         # Регулярки для поиска функций
@@ -343,6 +371,38 @@ class DiffDetector:
                 if any(kw in clean_line for kw in ['if (', 'else if', 'switch', '&&', '||']):
                     metadata['condition_changes'].append(('removed', clean_line[:150]))
 
+        # CSS-специфичные паттерны
+        if file_type == 'css':
+            css_selector_pattern = re.compile(r'([.#][\w-]+)')
+            css_property_pattern = re.compile(r'([\w-]+)\s*:')
+
+            for line in diff_lines:
+                if line.startswith('+') and not line.startswith('+++'):
+                    clean_line = line[1:].strip()
+                    # CSS селекторы
+                    selectors = css_selector_pattern.findall(clean_line)
+                    for sel in selectors:
+                        if sel not in metadata['css_selectors_added']:
+                            metadata['css_selectors_added'].append(sel)
+                    # CSS свойства (только внутри правил, не селекторы)
+                    if ':' in clean_line and not clean_line.endswith('{'):
+                        props = css_property_pattern.findall(clean_line)
+                        for prop in props:
+                            if prop not in metadata['css_properties_added'] and not prop.startswith('.') and not prop.startswith('#'):
+                                metadata['css_properties_added'].append(prop)
+
+                elif line.startswith('-') and not line.startswith('---'):
+                    clean_line = line[1:].strip()
+                    selectors = css_selector_pattern.findall(clean_line)
+                    for sel in selectors:
+                        if sel not in metadata['css_selectors_removed']:
+                            metadata['css_selectors_removed'].append(sel)
+                    if ':' in clean_line and not clean_line.endswith('{'):
+                        props = css_property_pattern.findall(clean_line)
+                        for prop in props:
+                            if prop not in metadata['css_properties_removed'] and not prop.startswith('.') and not prop.startswith('#'):
+                                metadata['css_properties_removed'].append(prop)
+
         # Найти изменённые функции (функция есть и в added, и в removed)
         common_funcs = set(metadata['added_functions']) & set(metadata['removed_functions'])
         metadata['modified_functions'] = list(common_funcs)
@@ -384,7 +444,8 @@ class DiffDetector:
 
         # Извлечь метаданные из diff
         diff_lines = change_info.get('diff_lines', [])
-        metadata = self._extract_diff_metadata(diff_lines)
+        file_type = change_info.get('file_type', 'js')
+        metadata = self._extract_diff_metadata(diff_lines, file_type=file_type)
 
         # Добавить метаданные в контекст
         if any(metadata.values()):
@@ -404,6 +465,18 @@ class DiffDetector:
 
             if metadata['condition_changes']:
                 context_parts.append(f"  Изменения логики (if/else/switch): {len(metadata['condition_changes'])} шт.")
+
+            if metadata.get('css_selectors_added'):
+                context_parts.append(f"  Добавлены CSS-селекторы: {', '.join(metadata['css_selectors_added'][:10])}")
+
+            if metadata.get('css_selectors_removed'):
+                context_parts.append(f"  Удалены CSS-селекторы: {', '.join(metadata['css_selectors_removed'][:10])}")
+
+            if metadata.get('css_properties_added'):
+                context_parts.append(f"  Добавлены CSS-свойства: {', '.join(metadata['css_properties_added'][:10])}")
+
+            if metadata.get('css_properties_removed'):
+                context_parts.append(f"  Удалены CSS-свойства: {', '.join(metadata['css_properties_removed'][:10])}")
 
             context_parts.append("")
 

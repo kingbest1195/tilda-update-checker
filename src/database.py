@@ -951,6 +951,82 @@ class Database:
         finally:
             session.close()
 
+    # ==================== МЕТОДЫ ДЛЯ ИСТОРИЧЕСКОГО КОНТЕКСТА ====================
+
+    def get_change_history(self, file_id: int, limit: int = 5) -> List[dict]:
+        """
+        Получить историю изменений файла
+
+        Args:
+            file_id: ID файла
+            limit: Максимальное количество записей
+
+        Returns:
+            Список словарей с историей изменений
+        """
+        with self.SessionLocal() as session:
+            try:
+                results = session.query(Change, Announcement)\
+                    .outerjoin(Announcement, Change.id == Announcement.change_id)\
+                    .filter(Change.file_id == file_id)\
+                    .order_by(Change.detected_at.desc())\
+                    .limit(limit)\
+                    .all()
+
+                history = []
+                for change, announcement in results:
+                    history.append({
+                        'detected_at': change.detected_at,
+                        'change_percent': change.change_percent,
+                        'diff_summary': change.diff_summary,
+                        'severity': announcement.severity if announcement else None,
+                        'description': announcement.content[:100] if announcement and announcement.content else None,
+                    })
+                return history
+            except Exception as e:
+                logger.error(f"Ошибка при получении истории изменений: {e}")
+                return []
+
+    def get_recent_changes_by_category(self, category: str, hours: int = 4) -> List[dict]:
+        """
+        Получить недавние изменения в той же категории
+
+        Args:
+            category: Категория файлов
+            hours: За последние N часов
+
+        Returns:
+            Список словарей с изменениями
+        """
+        from datetime import timedelta
+
+        with self.SessionLocal() as session:
+            try:
+                cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+                results = session.query(Change, TrackedFile)\
+                    .join(TrackedFile, Change.file_id == TrackedFile.id)\
+                    .filter(
+                        TrackedFile.category == category,
+                        Change.detected_at >= cutoff
+                    )\
+                    .order_by(Change.detected_at.desc())\
+                    .all()
+
+                changes = []
+                for change, tracked_file in results:
+                    filename = tracked_file.url.split('/')[-1] if tracked_file.url else 'N/A'
+                    changes.append({
+                        'url': tracked_file.url,
+                        'filename': filename,
+                        'change_percent': change.change_percent,
+                        'diff_summary': change.diff_summary,
+                    })
+                return changes
+            except Exception as e:
+                logger.error(f"Ошибка при получении изменений по категории: {e}")
+                return []
+
     # ==================== МЕТОДЫ ДЛЯ TELEGRAM СТАТУСА ====================
 
     def get_pending_announcements(self, limit: int = 10) -> List[Announcement]:
