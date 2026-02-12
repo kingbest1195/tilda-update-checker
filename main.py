@@ -1048,6 +1048,28 @@ def test_telegram_topics():
         print("⚠️ Некоторые топики недоступны. Проверьте логи выше.\n")
 
 
+def handle_auto_add():
+    """Автоматически добавить обнаруженные файлы в мониторинг"""
+    logger.info("🤖 Автодобавление обнаруженных файлов")
+
+    if not init_database_with_health_check():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+
+    stats = discovery.auto_add_discovered_files()
+
+    print(f"\n✅ Добавлено: {stats['added']}")
+    print(f"⏭️  Пропущено: {stats['skipped']}")
+    print(f"❌ Ошибок: {stats['failed']}")
+
+    if stats['details']:
+        print("\nДетали:")
+        for d in stats['details']:
+            status_icon = '✅' if d['status'] == 'added' else '❌'
+            print(f"  {status_icon} [{d['category']}] {d['url']}")
+    print()
+
+
 def main():
     """Главная функция"""
     parser = argparse.ArgumentParser(
@@ -1068,6 +1090,9 @@ def main():
   %(prog)s --version-history tilda-cart     # История версий
   %(prog)s --migration-status               # Статус миграций
   %(prog)s --dashboard                      # Показать dashboard
+
+  # Автодобавление
+  %(prog)s --auto-add                       # Добавить обнаруженные файлы в мониторинг
 
   # Telegram команды
   %(prog)s --telegram-status                # Статистика Telegram отправок
@@ -1167,6 +1192,13 @@ def main():
         help="Тестировать все Telegram топики (General, Alerts, Digest, Discovery)"
     )
 
+    # Автодобавление
+    parser.add_argument(
+        "--auto-add",
+        action="store_true",
+        help="Автоматически добавить все обнаруженные файлы в мониторинг"
+    )
+
     # Дополнительные параметры
     parser.add_argument(
         "-n", "--number",
@@ -1215,6 +1247,8 @@ def main():
         handle_retry_telegram()
     elif args.test_telegram_topics:
         test_telegram_topics()
+    elif args.auto_add:
+        handle_auto_add()
     else:
         parser.print_help()
         print("\n⚠️ Укажите команду для выполнения\n")

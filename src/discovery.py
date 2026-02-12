@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 # Паттерны для категоризации обнаруженных файлов
 PATTERN_CATEGORIES = {
     r"tilda-members|members\.tildaapi\.com|members2\.tildacdn\.com": "members",
-    r"tilda-(cart|catalog|wishlist|products|variant)": "ecommerce",
+    r"tilda-(cart|catalog|wishlist|products|variant|range)": "ecommerce",
     r"tilda-zero": "zero_block",
-    r"tilda-(quiz|cards|stories|slider|popup|slds|zoom|video)": "ui_components",
-    r"tilda-(scripts|grid|forms|animation|cover|menu|lazyload|events)": "core",
+    r"tilda-(quiz|cards|stories|slider|popup|slds|zoom|video|map|img-select|beforeafter|menu-burger|menusub|videoplaylist)": "ui_components",
+    r"tilda-(scripts|grid|forms|animation|cover|menu-\d|lazyload|events|polyfill|fallback)": "core",
     r"tilda-(phone|conditional|payment|ratescale|step-manager|widget|lk|skiplink|stat|error|performance|table|paint|redactor|highlight)": "utilities",
 }
 
@@ -171,18 +171,30 @@ class FileDiscovery:
     
     def _is_tilda_url(self, url: str) -> bool:
         """
-        Проверить, относится ли URL к Tilda
-        
+        Проверить, относится ли URL к Tilda (исключая мусорные page-specific бандлы)
+
         Args:
             url: URL для проверки
-            
+
         Returns:
-            True если это Tilda URL
+            True если это Tilda URL, пригодный для мониторинга
         """
         parsed = urlparse(url)
         domain = parsed.netloc
-        
-        return any(tilda_domain in domain for tilda_domain in TILDA_DOMAINS)
+
+        if not any(tilda_domain in domain for tilda_domain in TILDA_DOMAINS):
+            return False
+
+        # Исключить page-specific бандлы (tilda-blocks-page*)
+        path = parsed.path
+        if 'tilda-blocks-page' in path:
+            return False
+
+        # Исключить URL с query string timestamps (?t=...)
+        if parsed.query and re.match(r'^t=\d+$', parsed.query):
+            return False
+
+        return True
     
     def _categorize_file(self, url: str, source_page: str) -> Dict:
         """
@@ -268,6 +280,56 @@ class FileDiscovery:
         except Exception as e:
             logger.error(f"Ошибка при сохранении обнаруженного файла {file_info['url']}: {e}")
     
+    def auto_add_discovered_files(self) -> Dict:
+        """
+        Автоматически добавить обнаруженные файлы в мониторинг.
+        Фильтрует мусорные URL, вызывает fetcher.add_file_to_monitoring().
+
+        Returns:
+            {'added': int, 'skipped': int, 'failed': int, 'details': [...]}
+        """
+        from src.cdn_fetcher import fetcher
+
+        undiscovered = db.get_undiscovered_files()
+        stats = {'added': 0, 'skipped': 0, 'failed': 0, 'details': []}
+
+        for df in undiscovered:
+            url = df.url
+
+            # Фильтр: page-specific бандлы
+            if 'tilda-blocks-page' in url:
+                db.mark_discovered_as_tracked(df.id)
+                stats['skipped'] += 1
+                logger.info(f"⏭️ Пропущен page-specific бандл: {url}")
+                continue
+
+            # Фильтр: URL с query string (cache-busters)
+            parsed = urlparse(url)
+            if parsed.query:
+                db.mark_discovered_as_tracked(df.id)
+                stats['skipped'] += 1
+                logger.info(f"⏭️ Пропущен URL с query string: {url}")
+                continue
+
+            # Определить категорию
+            category = df.suggested_category or 'unknown'
+            priority = CATEGORY_PRIORITIES.get(category, 'MEDIUM')
+
+            # Добавить в мониторинг
+            success = fetcher.add_file_to_monitoring(url, category=category, priority=priority)
+
+            if success:
+                db.mark_discovered_as_tracked(df.id)
+                stats['added'] += 1
+                stats['details'].append({'url': url, 'category': category, 'status': 'added'})
+                logger.info(f"✅ Авто-добавлен: {url} [{category}/{priority}]")
+            else:
+                stats['failed'] += 1
+                stats['details'].append({'url': url, 'category': category, 'status': 'failed'})
+                logger.warning(f"❌ Не удалось добавить: {url}")
+
+        return stats
+
     def get_new_discoveries(self) -> List[Dict]:
         """
         Получить список файлов, которые еще не добавлены в отслеживание
@@ -378,15 +440,22 @@ class FileDiscovery:
         logger.info("Шаг 1/3: Сканирование канарейка-страниц...")
         discovered_files = self.discover_files()
         
-        # 2. Анализ обнаруженных файлов через version_detector
-        logger.info("\nШаг 2/3: Анализ обнаруженных файлов...")
+        # 2. Автодобавление новых файлов в мониторинг
+        auto_add_stats = None
+        if config.AUTO_ADD_DISCOVERED and discovered_files:
+            logger.info("\nШаг 2/4: Автодобавление новых файлов в мониторинг...")
+            auto_add_stats = self.auto_add_discovered_files()
+            logger.info(f"   Добавлено: {auto_add_stats['added']}, пропущено: {auto_add_stats['skipped']}, ошибок: {auto_add_stats['failed']}")
+
+        # 3. Анализ обнаруженных файлов через version_detector
+        logger.info("\nШаг 3/4: Анализ обнаруженных файлов...")
         analysis_result = detector.analyze_discovered_files()
-        
+
         version_updates = analysis_result['version_updates']
         new_files = analysis_result['new_files']
-        
-        # 3. Вывод отчетов
-        logger.info("\nШаг 3/3: Формирование отчетов...")
+
+        # 4. Вывод отчетов
+        logger.info("\nШаг 4/4: Формирование отчетов...")
         
         if version_updates:
             detector.print_version_updates_report(version_updates)
@@ -410,14 +479,17 @@ class FileDiscovery:
         logger.info("="*80)
         logger.info("✅ DISCOVERY MODE ЗАВЕРШЕН")
         logger.info(f"   Обнаружено файлов: {len(discovered_files)}")
+        if auto_add_stats:
+            logger.info(f"   Авто-добавлено: {auto_add_stats['added']}, пропущено: {auto_add_stats['skipped']}")
         logger.info(f"   Обновлений версий: {len(version_updates)}")
         logger.info(f"   Новых файлов: {len(new_files)}")
         logger.info("="*80 + "\n")
-        
+
         return {
             'discovered_files': discovered_files,
             'version_updates': version_updates,
-            'new_files': new_files
+            'new_files': new_files,
+            'auto_add_stats': auto_add_stats
         }
 
 

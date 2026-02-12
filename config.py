@@ -48,6 +48,7 @@ TILDA_MONITORED_FILES = {
             "https://static.tildacdn.com/css/tilda-forms-1.0.min.css",
             "https://static.tildacdn.com/js/tilda-lazyload-1.0.min.js",
             "https://static.tildacdn.com/js/tilda-events-1.0.min.js",
+            "https://static.tildacdn.com/js/tilda-polyfill-1.0.min.js",
             "https://static.tildacdn.com/js/jquery-1.10.2.min.js",
             "https://static.tildacdn.com/js/hammer.min.js",
         ]
@@ -133,6 +134,7 @@ TILDA_MONITORED_FILES = {
             "https://static.tildacdn.com/css/tilda-zoom-2.0.min.css",
             "https://static.tildacdn.com/js/tilda-video-1.0.min.js",
             "https://static.tildacdn.com/js/tilda-video-processor-1.0.min.js",
+            "https://static.tildacdn.com/js/tilda-map-1.0.min.js",
         ]
     },
     "utilities": {
@@ -167,6 +169,9 @@ TILDA_MONITORED_FILES = {
 TILDA_CORE_FILES = []
 for category_data in TILDA_MONITORED_FILES.values():
     TILDA_CORE_FILES.extend(category_data["files"])
+
+# Автодобавление обнаруженных файлов в мониторинг
+AUTO_ADD_DISCOVERED = os.getenv("AUTO_ADD_DISCOVERED", "true").lower() == "true"
 
 # HTTP Configuration
 REQUEST_TIMEOUT = 30  # секунды
