@@ -82,7 +82,25 @@ class CDNFetcher:
             if not files:
                 logger.warning("⚠️ БД пуста, используется fallback на config.py")
                 use_db = False
-        
+            else:
+                # Синхронизация: добавить файлы из config.py, которых нет в БД
+                db_urls = {f['url'] for f in files}
+                missing_count = 0
+                for category, category_config in config.TILDA_MONITORED_FILES.items():
+                    priority = category_config.get('priority', 'MEDIUM')
+                    for url in category_config.get('files', []):
+                        if url not in db_urls:
+                            missing_count += 1
+                            files.append({
+                                'url': url,
+                                'type': self._get_file_type(url),
+                                'category': category,
+                                'priority': priority,
+                                'domain': self._extract_domain(url)
+                            })
+                if missing_count > 0:
+                    logger.info(f"🔄 Синхронизация config → БД: добавлено {missing_count} новых файлов")
+
         if not use_db:
             # СТАТИЧЕСКИЙ КОНФИГ: из config.py
             logger.debug("Использование статического конфига из config.py...")
