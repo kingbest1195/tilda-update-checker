@@ -100,6 +100,12 @@ class Announcement(Base):
     severity = Column(String(50))  # КРИТИЧЕСКОЕ/ВАЖНОЕ/НЕЗНАЧИТЕЛЬНОЕ
     generated_at = Column(DateTime, default=datetime.utcnow)
 
+    # Структурированные поля для дайджеста
+    description_short = Column(Text, nullable=True)    # Чистое описание из анализа
+    user_impact = Column(Text, nullable=True)           # Влияние на пользователей
+    trend = Column(Text, nullable=True)                 # Тренд разработки
+    feature = Column(Text, nullable=True)               # Предполагаемая фича
+
     # TELEGRAM СТАТУС
     telegram_sent = Column(Integer, default=0)  # 0 = не отправлено, 1 = отправлено
     telegram_sent_at = Column(DateTime, nullable=True)  # Время успешной отправки
@@ -343,7 +349,9 @@ class Database:
                 required_columns = ['id', 'change_id', 'title', 'content',
                                   'telegram_sent', 'telegram_sent_at',
                                   'telegram_error', 'telegram_retry_count',
-                                  'telegram_next_retry']
+                                  'telegram_next_retry',
+                                  'description_short', 'user_impact',
+                                  'trend', 'feature']
 
                 missing_columns = [c for c in required_columns if c not in columns]
 
@@ -394,37 +402,59 @@ class Database:
 
             missing_fields = [field for field in telegram_fields if field not in columns]
 
-            if not missing_fields:
+            # Миграция структурированных полей для дайджеста
+            digest_fields = {
+                'description_short': 'TEXT',
+                'user_impact': 'TEXT',
+                'trend': 'TEXT',
+                'feature': 'TEXT',
+            }
+            missing_digest = [f for f in digest_fields if f not in columns]
+
+            if not missing_fields and not missing_digest:
                 logger.info("✅ Схема БД актуальна, все поля присутствуют")
                 return True
 
             # Выполнить миграцию
-            logger.info(f"📝 Обнаружены отсутствующие поля: {missing_fields}")
             logger.info("🔄 Запуск автоматической миграции...")
 
             with self.get_session() as session:
-                # Добавить отсутствующие колонки
-                if 'telegram_sent' in missing_fields:
-                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_sent INTEGER DEFAULT 0"))
-                    logger.info("   ✓ telegram_sent добавлено")
+                # Telegram поля
+                if missing_fields:
+                    logger.info(f"📝 Добавление Telegram полей: {missing_fields}")
+                    if 'telegram_sent' in missing_fields:
+                        session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_sent INTEGER DEFAULT 0"))
+                        logger.info("   ✓ telegram_sent добавлено")
 
-                if 'telegram_sent_at' in missing_fields:
-                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_sent_at DATETIME"))
-                    logger.info("   ✓ telegram_sent_at добавлено")
+                    if 'telegram_sent_at' in missing_fields:
+                        session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_sent_at DATETIME"))
+                        logger.info("   ✓ telegram_sent_at добавлено")
 
-                if 'telegram_error' in missing_fields:
-                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_error TEXT"))
-                    logger.info("   ✓ telegram_error добавлено")
+                    if 'telegram_error' in missing_fields:
+                        session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_error TEXT"))
+                        logger.info("   ✓ telegram_error добавлено")
 
-                if 'telegram_retry_count' in missing_fields:
-                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_retry_count INTEGER DEFAULT 0"))
-                    logger.info("   ✓ telegram_retry_count добавлено")
+                    if 'telegram_retry_count' in missing_fields:
+                        session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_retry_count INTEGER DEFAULT 0"))
+                        logger.info("   ✓ telegram_retry_count добавлено")
 
-                if 'telegram_next_retry' in missing_fields:
-                    session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_next_retry DATETIME"))
-                    logger.info("   ✓ telegram_next_retry добавлено")
+                    if 'telegram_next_retry' in missing_fields:
+                        session.execute(text("ALTER TABLE announcements ADD COLUMN telegram_next_retry DATETIME"))
+                        logger.info("   ✓ telegram_next_retry добавлено")
 
-                session.commit()
+                    session.commit()
+                    logger.info("✅ Миграция Telegram полей завершена")
+
+                # Дайджест поля
+                if missing_digest:
+                    logger.info(f"📝 Добавление полей дайджеста: {missing_digest}")
+                    for field in missing_digest:
+                        session.execute(text(
+                            f"ALTER TABLE announcements ADD COLUMN {field} {digest_fields[field]}"
+                        ))
+                        logger.info(f"   ✓ {field} добавлено")
+                    session.commit()
+                    logger.info("✅ Миграция полей дайджеста завершена")
 
             logger.info("✅ Миграция схемы БД успешно завершена")
             return True
@@ -558,17 +588,23 @@ class Database:
                 raise
     
     def save_announcement(self, change_id: int, title: str, content: str,
-                         change_type: str = None, severity: str = None) -> Announcement:
+                         change_type: str = None, severity: str = None,
+                         description_short: str = None, user_impact: str = None,
+                         trend: str = None, feature: str = None) -> Announcement:
         """
         Сохранить анонс
-        
+
         Args:
             change_id: ID изменения
             title: Заголовок анонса
             content: Содержимое анонса
             change_type: Тип изменения
             severity: Уровень важности
-            
+            description_short: Чистое описание из анализа
+            user_impact: Влияние на пользователей
+            trend: Тренд разработки
+            feature: Предполагаемая фича
+
         Returns:
             Announcement объект
         """
@@ -579,7 +615,11 @@ class Database:
                     title=title,
                     content=content,
                     change_type=change_type,
-                    severity=severity
+                    severity=severity,
+                    description_short=description_short,
+                    user_impact=user_impact,
+                    trend=trend,
+                    feature=feature,
                 )
                 session.add(announcement)
                 session.commit()

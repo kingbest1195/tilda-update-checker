@@ -91,12 +91,13 @@ class TelegramNotifier:
             logger.error(f"Ошибка при отправке в Telegram: {e}", exc_info=True)
             return False
     
-    def send_daily_digest(self, announcements: List[Dict]) -> bool:
+    def send_daily_digest(self, announcements: List[Dict], digest_analysis: Dict = None) -> bool:
         """
         Отправить ежедневный дайджест изменений
 
         Args:
             announcements: Список анонсов за день
+            digest_analysis: Результат LLM-анализа дайджеста (опционально)
 
         Returns:
             True если успешно отправлено
@@ -109,7 +110,7 @@ class TelegramNotifier:
             return False
 
         try:
-            message = self._format_digest(announcements)
+            message = self._format_digest(announcements, digest_analysis=digest_analysis)
             return self._send_message(message, thread_id=self.digest_thread_id)
         except Exception as e:
             logger.error(f"Ошибка при отправке дайджеста: {e}", exc_info=True)
@@ -263,16 +264,32 @@ class TelegramNotifier:
 
         return message
     
-    def _format_digest(self, announcements: List[Dict]) -> str:
+    def _format_digest(self, announcements: List[Dict], digest_analysis: Dict = None) -> str:
         """
-        Форматировать ежедневный дайджест
-        
+        Форматировать ежедневный дайджест с LLM-сводкой
+
         Args:
             announcements: Список анонсов
-            
+            digest_analysis: Результат LLM-анализа (опционально)
+
         Returns:
             Отформатированное сообщение
         """
+        message = f"📋 *Дайджест Tilda* | {datetime.now().strftime('%d %B %Y')}\n\n"
+
+        # LLM-сводка дня (если доступна)
+        if digest_analysis:
+            summary = digest_analysis.get('summary', '')
+            if summary:
+                message += f"📈 *Сводка дня:*\n{summary}\n\n"
+
+            attention = digest_analysis.get('attention')
+            if attention:
+                message += f"⚠️ *Обратить внимание:* {attention}\n\n"
+        else:
+            # Fallback: механическая сводка по категориям
+            message += self._build_category_summary(announcements)
+
         # Группировка по приоритетам
         by_priority = {
             'CRITICAL': [],
@@ -280,46 +297,127 @@ class TelegramNotifier:
             'MEDIUM': [],
             'LOW': []
         }
-        
+
         for ann in announcements:
             priority = ann.get('priority', 'MEDIUM')
-            by_priority[priority].append(ann)
-        
-        message = f"""🔔 **Обновления Tilda** | {datetime.now().strftime('%d %B %Y')}
+            if priority in by_priority:
+                by_priority[priority].append(ann)
+            else:
+                by_priority['MEDIUM'].append(ann)
 
-"""
-        
         # CRITICAL
         if by_priority['CRITICAL']:
-            message += f"🔴 **КРИТИЧЕСКИЕ ИЗМЕНЕНИЯ** ({len(by_priority['CRITICAL'])})\n\n"
-            for ann in by_priority['CRITICAL']:
-                category_emoji = CATEGORY_EMOJI.get(ann.get('category', 'unknown'), '📦')
-                message += f"{category_emoji} {ann.get('category', 'unknown').upper()}\n"
-                message += f"  • {ann.get('title', 'Без заголовка')}\n"
-                message += f"    → {ann.get('description', 'Нет описания')[:100]}...\n\n"
-        
+            message += f"🔴 *КРИТИЧЕСКИЕ* ({len(by_priority['CRITICAL'])})\n"
+            message += self._format_priority_group(by_priority['CRITICAL'], show_impact=True)
+
         # HIGH
         if by_priority['HIGH']:
-            message += f"🟡 **ВАЖНЫЕ ИЗМЕНЕНИЯ** ({len(by_priority['HIGH'])})\n\n"
-            for ann in by_priority['HIGH']:
+            message += f"🟡 *ВАЖНЫЕ* ({len(by_priority['HIGH'])})\n"
+            message += self._format_priority_group(by_priority['HIGH'], show_impact=False)
+
+        # MEDIUM + LOW (кратко)
+        minor = by_priority['MEDIUM'] + by_priority['LOW']
+        if minor:
+            message += f"🟢 *НЕЗНАЧИТЕЛЬНЫЕ* ({len(minor)})\n"
+            # Группируем файлы через запятую
+            filenames = []
+            for ann in minor:
                 category_emoji = CATEGORY_EMOJI.get(ann.get('category', 'unknown'), '📦')
-                message += f"{category_emoji} {ann.get('category', 'unknown').upper()}\n"
-                message += f"  • {ann.get('title', 'Без заголовка')}\n"
-                message += f"    → {ann.get('description', 'Нет описания')[:100]}...\n\n"
-        
-        # MEDIUM
-        if by_priority['MEDIUM']:
-            message += f"🟢 **НЕЗНАЧИТЕЛЬНЫЕ ИЗМЕНЕНИЯ** ({len(by_priority['MEDIUM'])})\n\n"
-            # Только заголовки для MEDIUM
-            for ann in by_priority['MEDIUM']:
-                category_emoji = CATEGORY_EMOJI.get(ann.get('category', 'unknown'), '📦')
-                message += f"{category_emoji} {ann.get('title', 'Без заголовка')}\n"
-        
-        message += f"\n━━━━━━━━━━━━━━━━\n"
-        message += f"📊 Всего изменений: {len(announcements)}\n"
-        message += f"🕐 За последние 24 часа\n"
-        
+                title = ann.get('title', 'Без заголовка')
+                # Извлечь имя файла из заголовка
+                filename = title.split(' - ')[0] if ' - ' in title else title.split('/')[-1]
+                filenames.append(f"{category_emoji} {self._smart_truncate(filename, 40)}")
+            message += "  " + ", ".join(filenames) + "\n"
+
+        # Тренд (из LLM или из данных)
+        if digest_analysis and digest_analysis.get('trend'):
+            message += f"\n📈 *Тренд:* {digest_analysis['trend']}\n"
+
+        message += "\n━━━━━━━━━━━━━━━━\n"
+        message += f"📊 Всего: {len(announcements)} изменений за 24ч\n"
+
+        # Сжатие если > 4000 символов (лимит Telegram)
+        if len(message) > 4000:
+            message = self._compress_digest(message)
+
         return message
+
+    def _format_priority_group(self, items: List[Dict], show_impact: bool = False) -> str:
+        """Форматировать группу анонсов одного приоритета"""
+        result = ""
+        # Группировка по категориям внутри приоритета
+        by_cat = {}
+        for ann in items:
+            cat = ann.get('category', 'unknown')
+            if cat not in by_cat:
+                by_cat[cat] = []
+            by_cat[cat].append(ann)
+
+        for cat, cat_items in by_cat.items():
+            category_emoji = CATEGORY_EMOJI.get(cat, '📦')
+            result += f"  {category_emoji} {cat.upper()}\n"
+            for ann in cat_items:
+                title = ann.get('title', 'Без заголовка')
+                filename = title.split(' - ')[0] if ' - ' in title else title.split('/')[-1]
+                desc = ann.get('description', '')
+                result += f"  • {self._smart_truncate(filename, 40)}\n"
+                if desc:
+                    result += f"    {self._smart_truncate(desc, 120)}\n"
+                if show_impact and ann.get('user_impact'):
+                    result += f"    👥 {self._smart_truncate(ann['user_impact'], 100)}\n"
+            result += "\n"
+        return result
+
+    def _smart_truncate(self, text: str, max_len: int) -> str:
+        """Обрезка по границе слова"""
+        if not text or len(text) <= max_len:
+            return text or ''
+        truncated = text[:max_len]
+        # Найти последний пробел
+        last_space = truncated.rfind(' ')
+        if last_space > max_len * 0.6:
+            truncated = truncated[:last_space]
+        return truncated.rstrip('.,;: ') + '...'
+
+    def _build_category_summary(self, announcements: List[Dict]) -> str:
+        """Fallback: механическая сводка по категориям (без LLM)"""
+        by_cat = {}
+        for ann in announcements:
+            cat = ann.get('category', 'unknown')
+            if cat not in by_cat:
+                by_cat[cat] = 0
+            by_cat[cat] += 1
+
+        if not by_cat:
+            return ""
+
+        parts = []
+        for cat, count in sorted(by_cat.items(), key=lambda x: x[1], reverse=True):
+            category_emoji = CATEGORY_EMOJI.get(cat, '📦')
+            parts.append(f"{category_emoji} {cat} ({count})")
+
+        return f"📈 *Обзор:* Изменения в {', '.join(parts)}\n\n"
+
+    def _compress_digest(self, message: str) -> str:
+        """Сжать дайджест если превышает лимит Telegram (4096 символов)"""
+        if len(message) <= 4000:
+            return message
+
+        # Стратегия: убрать user_impact строки
+        lines = message.split('\n')
+        compressed = []
+        for line in lines:
+            if line.strip().startswith('👥'):
+                continue
+            compressed.append(line)
+
+        result = '\n'.join(compressed)
+
+        # Если всё ещё длинный — обрезаем описания
+        if len(result) > 4000:
+            result = result[:3950] + '\n\n... (сокращено)\n'
+
+        return result
     
     def _format_discovery_report(self, discovered_files: List[Dict]) -> str:
         """

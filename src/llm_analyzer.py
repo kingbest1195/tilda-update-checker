@@ -5,7 +5,7 @@ import logging
 import json
 import time
 from threading import Lock
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from openai import OpenAI
 from openai import OpenAIError
@@ -160,7 +160,7 @@ class LLMAnalyzer:
                 ],
                 response_format={"type": "json_object"},
                 temperature=config.OPENAI_TEMPERATURE,
-                max_tokens=config.OPENAI_MAX_TOKENS
+                max_completion_tokens=config.OPENAI_MAX_TOKENS
             )
             
             # Извлечь ответ
@@ -230,12 +230,12 @@ class LLMAnalyzer:
         if history:
             history_lines = ["ИСТОРИЯ ИЗМЕНЕНИЙ ЭТОГО ФАЙЛА:"]
             for h in history[:5]:
-                date_str = h.get('detected_at', 'N/A')
+                date_str = h.get('detected_at') or 'N/A'
                 if hasattr(date_str, 'strftime'):
                     date_str = date_str.strftime('%Y-%m-%d')
-                pct = h.get('change_percent', 0)
-                sev = h.get('severity', '')
-                desc = h.get('description', '')[:80]
+                pct = h.get('change_percent') or 0
+                sev = h.get('severity') or ''
+                desc = (h.get('description') or '')[:80]
                 history_lines.append(f"- {date_str}: изменение {pct}%, {sev}. {desc}")
             history_section = "\n".join(history_lines) + "\n"
 
@@ -245,8 +245,8 @@ class LLMAnalyzer:
         if concurrent:
             concurrent_lines = ["ОДНОВРЕМЕННО ИЗМЕНЁННЫЕ ФАЙЛЫ:"]
             for c in concurrent[:5]:
-                fname = c.get('filename', c.get('url', 'N/A'))
-                pct = c.get('change_percent', 0)
+                fname = c.get('filename') or c.get('url') or 'N/A'
+                pct = c.get('change_percent') or 0
                 concurrent_lines.append(f"- {fname}: изменение {pct}%")
             concurrent_lines.append("→ Если файлы связаны — это координированное обновление, опиши общий тренд.")
             concurrent_section = "\n".join(concurrent_lines) + "\n"
@@ -565,7 +565,7 @@ class LLMAnalyzer:
                     ],
                     response_format={"type": "json_object"},
                     temperature=config.OPENAI_TEMPERATURE,
-                    max_tokens=500
+                    max_completion_tokens=500
                 )
 
                 content = response.choices[0].message.content
@@ -583,6 +583,61 @@ class LLMAnalyzer:
                 continue
 
         return batch_results if batch_results else None
+
+    def analyze_digest(self, digest_items: List[Dict]) -> Optional[Dict]:
+        """
+        LLM-анализ дневной сводки: общая картина, тренды, рекомендации.
+        Получает список всех дневных изменений и создаёт осмысленную сводку.
+        """
+        if not self.client or not digest_items:
+            return None
+
+        # Собрать контекст всех изменений дня
+        changes_text = []
+        for item in digest_items:
+            category = item.get('category', 'unknown')
+            severity = item.get('severity', '')
+            desc = item.get('description', '')
+            impact = item.get('user_impact', '')
+            filename = (item.get('title') or '').split(' - ')[0]
+
+            entry = f"- [{category}/{severity}] {filename}: {desc}"
+            if impact:
+                entry += f" | Влияние: {impact}"
+            changes_text.append(entry)
+
+        prompt = f"""За последние 24 часа в Tilda CDN обнаружено {len(digest_items)} изменений:
+
+{chr(10).join(changes_text)}
+
+Создай СВОДКУ ДНЯ для менеджеров."""
+
+        try:
+            self._wait_for_rate_limit()
+            response = self.client.chat.completions.create(
+                model=config.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": config.DIGEST_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=config.OPENAI_TEMPERATURE,
+                max_completion_tokens=config.OPENAI_DIGEST_MAX_TOKENS
+            )
+            content = response.choices[0].message.content
+            data = json.loads(content)
+
+            logger.info("LLM дайджест-анализ завершён")
+
+            return {
+                'summary': data.get('summary', ''),
+                'highlights': data.get('highlights', []),
+                'trend': data.get('trend'),
+                'attention': data.get('attention'),
+            }
+        except Exception as e:
+            logger.warning(f"Ошибка LLM-анализа дайджеста: {e}")
+            return None
 
     def estimate_tokens(self, text: str) -> int:
         """

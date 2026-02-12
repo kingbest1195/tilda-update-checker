@@ -174,7 +174,11 @@ class AnnouncementGenerator:
                     title=title,
                     content=content,
                     change_type=result.get('change_type'),
-                    severity=result.get('severity')
+                    severity=result.get('severity'),
+                    description_short=result.get('description', ''),
+                    user_impact=result.get('user_impact', ''),
+                    trend=result.get('trend'),
+                    feature=result.get('feature'),
                 )
                 
                 announcement_ids.append(announcement.id)

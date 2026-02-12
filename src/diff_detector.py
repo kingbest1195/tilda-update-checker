@@ -341,7 +341,9 @@ class DiffDetector:
                     match = re.search(pattern, clean_line)
                     if match:
                         func_name = match.group(1)
-                        metadata['added_functions'].append(func_name)
+                        # Игнорировать минифицированные имена (< 3 символов)
+                        if len(func_name) >= 3:
+                            metadata['added_functions'].append(func_name)
                         break
 
                 # Поиск новых import/require
@@ -360,7 +362,9 @@ class DiffDetector:
                     match = re.search(pattern, clean_line)
                     if match:
                         func_name = match.group(1)
-                        metadata['removed_functions'].append(func_name)
+                        # Игнорировать минифицированные имена (< 3 символов)
+                        if len(func_name) >= 3:
+                            metadata['removed_functions'].append(func_name)
                         break
 
                 # Поиск удалённых import/require
@@ -373,7 +377,7 @@ class DiffDetector:
 
         # CSS-специфичные паттерны
         if file_type == 'css':
-            css_selector_pattern = re.compile(r'([.#][\w-]+)')
+            css_selector_pattern = re.compile(r'([.#][a-zA-Z][\w-]*)')
             css_property_pattern = re.compile(r'([\w-]+)\s*:')
 
             for line in diff_lines:
@@ -410,6 +414,13 @@ class DiffDetector:
         # Убрать изменённые из added и removed
         metadata['added_functions'] = [f for f in metadata['added_functions'] if f not in common_funcs]
         metadata['removed_functions'] = [f for f in metadata['removed_functions'] if f not in common_funcs]
+
+        # Дедупликация CSS-селекторов: если селектор есть и в added, и в removed — это переформатирование
+        if file_type == 'css':
+            common_selectors = set(metadata['css_selectors_added']) & set(metadata['css_selectors_removed'])
+            if common_selectors:
+                metadata['css_selectors_added'] = [s for s in metadata['css_selectors_added'] if s not in common_selectors]
+                metadata['css_selectors_removed'] = [s for s in metadata['css_selectors_removed'] if s not in common_selectors]
 
         return metadata
 
@@ -485,29 +496,38 @@ class DiffDetector:
             context_parts.append("Ключевые изменения в коде:")
             context_parts.append("```")
 
-            # Извлечь только строки с изменениями (+ и -)
+            # Включить строки с изменениями (+/-) и строки контекста (без префикса)
+            # для лучшего понимания LLM, где именно произошли изменения
             code_changes = []
-            for line in diff_lines[:300]:  # Увеличено с 100 до 300 строк
-                if line.startswith('+') and not line.startswith('+++'):
+            for line in diff_lines[:300]:
+                # Пропускать заголовки diff
+                if line.startswith('+++') or line.startswith('---'):
+                    continue
+
+                # Строки контекста (без +/-) — показывают окружение изменений
+                if line.startswith('@@'):
+                    code_changes.append(line)
+                    continue
+
+                if line.startswith('+') or line.startswith('-'):
+                    prefix = line[0]
+                    content = line[1:]
                     # Для минифицированного кода - разбить длинные строки
                     if len(line) > 200:
-                        # Разбить по точке с запятой, взять первые 15 фрагментов
-                        fragments = line[1:].split(';')[:15]
+                        fragments = content.split(';')[:15]
                         for frag in fragments:
                             if frag.strip():
-                                code_changes.append(f"+{frag.strip()};")
+                                code_changes.append(f"{prefix}{frag.strip()};")
                     else:
                         code_changes.append(line)
-                elif line.startswith('-') and not line.startswith('---'):
+                elif not line.startswith('\\'):
+                    # Строка контекста — включаем для понимания окружения
                     if len(line) > 200:
-                        fragments = line[1:].split(';')[:15]
-                        for frag in fragments:
-                            if frag.strip():
-                                code_changes.append(f"-{frag.strip()};")
+                        code_changes.append(f" {line[:200].strip()}...")
                     else:
-                        code_changes.append(line)
+                        code_changes.append(f" {line}")
 
-            context_parts.extend(code_changes[:150])  # Увеличено с 50 до 150 фрагментов
+            context_parts.extend(code_changes[:200])
             context_parts.append("```")
 
         # Проверить лимит токенов

@@ -457,6 +457,26 @@ def run_discovery_and_migrate():
         logger.error(f"❌ Ошибка в Discovery Mode: {e}", exc_info=True)
 
 
+def _extract_description_fallback(content: str) -> str:
+    """
+    Извлечь описание из старого формата ann.content (fallback для записей без новых полей).
+    Ищет строку после "   " (описание в format_change_entry).
+    """
+    if not content:
+        return 'Нет описания'
+
+    lines = content.split('\n')
+    for line in lines:
+        stripped = line.strip()
+        # Пропускаем служебные строки
+        if stripped and not stripped.startswith(('1.', '2.', '3.')) and \
+           not any(stripped.startswith(p) for p in ('🔴', '🟡', '🟢', '⚪', 'Тип:', 'Значимость:', 'Влияние:', 'Рекомендации:', 'Тренд:', 'Фича:', 'Ссылка:')):
+            if len(stripped) > 15:  # Достаточно длинная строка — это описание
+                return stripped[:300]
+
+    return content[:200] if content else 'Нет описания'
+
+
 def send_daily_digest_task():
     """Отправить ежедневный дайджест всех анонсов за последние 24 часа"""
     try:
@@ -471,19 +491,24 @@ def send_daily_digest_task():
         # Получить все анонсы за последние 24 часа
         with db.get_session() as session:
             from datetime import timedelta
-            from src.database import Announcement
+            from src.database import Announcement, Change, TrackedFile
+            from sqlalchemy.orm import joinedload
 
             yesterday = datetime.now() - timedelta(hours=24)
-            announcements_raw = session.query(Announcement).filter(
-                Announcement.generated_at >= yesterday
-            ).order_by(Announcement.generated_at.desc()).all()
+            announcements_raw = session.query(Announcement)\
+                .options(
+                    joinedload(Announcement.change).joinedload(Change.file)
+                )\
+                .filter(
+                    Announcement.generated_at >= yesterday
+                ).order_by(Announcement.generated_at.desc()).all()
 
             if not announcements_raw:
                 logger.info("ℹ️ Нет анонсов за последние 24 часа")
                 logger.info("="*80 + "\n")
                 return
 
-            # Форматировать для telegram_notifier
+            # Собрать структурированные данные (без двойной обрезки)
             digest_data = []
             for ann in announcements_raw:
                 tracked_file = ann.change.file if ann.change else None
@@ -493,16 +518,30 @@ def send_daily_digest_task():
                     'severity': ann.severity or 'НЕЗНАЧИТЕЛЬНОЕ',
                     'category': tracked_file.category if tracked_file else 'unknown',
                     'priority': tracked_file.priority if tracked_file else 'MEDIUM',
-                    'description': ann.content[:150] if ann.content else 'Нет описания',
+                    'description': ann.description_short or _extract_description_fallback(ann.content),
+                    'user_impact': ann.user_impact or '',
+                    'trend': ann.trend,
+                    'feature': ann.feature,
+                    'change_type': ann.change_type or '',
                     'url': tracked_file.url if tracked_file else 'N/A',
-                    'created_at': ann.generated_at
+                    'created_at': ann.generated_at,
                 })
 
-            logger.info(f"📨 Отправка дайджеста: {len(digest_data)} анонсов")
+            logger.info(f"📨 Подготовка дайджеста: {len(digest_data)} анонсов")
+
+            # LLM-анализ дайджеста (общая картина дня)
+            digest_analysis = None
+            if analyzer.client:
+                logger.info("🤖 Запуск LLM-анализа дайджеста...")
+                digest_analysis = analyzer.analyze_digest(digest_data)
+                if digest_analysis:
+                    logger.info(f"✅ LLM дайджест-анализ завершён: {digest_analysis.get('summary', '')[:80]}...")
+                else:
+                    logger.warning("⚠️ LLM-анализ дайджеста не дал результатов, используется механический формат")
 
             # Отправить в Telegram
             if notifier and notifier.enabled:
-                success = notifier.send_daily_digest(digest_data)
+                success = notifier.send_daily_digest(digest_data, digest_analysis=digest_analysis)
                 if success:
                     logger.info("✅ Дайджест успешно отправлен в Telegram")
                 else:
