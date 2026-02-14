@@ -1090,6 +1090,7 @@ class Database:
                 )\
                 .filter(
                     (Announcement.telegram_sent == 0) &
+                    (Announcement.telegram_retry_count < config.MAX_TELEGRAM_RETRIES) &
                     (
                         (Announcement.telegram_next_retry.is_(None)) |
                         (Announcement.telegram_next_retry <= now)
@@ -1140,17 +1141,26 @@ class Database:
                     announcement.telegram_retry_count += 1
                     announcement.telegram_error = error
 
-                    # Экспоненциальная задержка: 5 мин, 15 мин, 30 мин, 1 час, 2 часа
-                    from datetime import timedelta
-                    delays = [5, 15, 30, 60, 120]  # минуты
-                    delay_minutes = delays[min(announcement.telegram_retry_count - 1, len(delays) - 1)]
+                    # Проверить лимит попыток
+                    if announcement.telegram_retry_count >= config.MAX_TELEGRAM_RETRIES:
+                        announcement.telegram_sent = -1  # permanently failed
+                        announcement.telegram_next_retry = None
+                        logger.error(
+                            f"Telegram: анонс {announcement_id} помечен как permanently failed "
+                            f"после {announcement.telegram_retry_count} попыток"
+                        )
+                    else:
+                        # Экспоненциальная задержка: 5 мин, 15 мин, 30 мин, 1 час, 2 часа
+                        from datetime import timedelta
+                        delays = [5, 15, 30, 60, 120]  # минуты
+                        delay_minutes = delays[min(announcement.telegram_retry_count - 1, len(delays) - 1)]
 
-                    announcement.telegram_next_retry = datetime.utcnow() + timedelta(minutes=delay_minutes)
+                        announcement.telegram_next_retry = datetime.utcnow() + timedelta(minutes=delay_minutes)
 
-                    logger.warning(
-                        f"Telegram отправка неудачна (попытка {announcement.telegram_retry_count}). "
-                        f"Следующая попытка через {delay_minutes} мин"
-                    )
+                        logger.warning(
+                            f"Telegram отправка неудачна (попытка {announcement.telegram_retry_count}). "
+                            f"Следующая попытка через {delay_minutes} мин"
+                        )
 
                 # Записать в лог
                 log_entry = TelegramLog(
@@ -1177,6 +1187,7 @@ class Database:
             total = session.query(Announcement).count()
             sent = session.query(Announcement).filter_by(telegram_sent=1).count()
             pending = session.query(Announcement).filter_by(telegram_sent=0).count()
+            permanently_failed = session.query(Announcement).filter_by(telegram_sent=-1).count()
 
             failed = session.query(Announcement).filter(
                 (Announcement.telegram_sent == 0) &
@@ -1188,8 +1199,50 @@ class Database:
                 'sent': sent,
                 'pending': pending,
                 'failed': failed,
+                'permanently_failed': permanently_failed,
                 'success_rate': (sent / total * 100) if total > 0 else 0
             }
+
+    def reset_telegram_status(self, announcement_id: int) -> bool:
+        """
+        Сбросить Telegram статус анонса для повторной отправки.
+        Используется для permanently failed анонсов (telegram_sent=-1).
+
+        Args:
+            announcement_id: ID анонса
+
+        Returns:
+            True если успешно сброшено
+        """
+        with self.SessionLocal() as session:
+            try:
+                announcement = session.query(Announcement).filter_by(
+                    id=announcement_id
+                ).first()
+
+                if not announcement:
+                    logger.error(f"Анонс {announcement_id} не найден")
+                    return False
+
+                old_status = announcement.telegram_sent
+                old_retries = announcement.telegram_retry_count
+
+                announcement.telegram_sent = 0
+                announcement.telegram_retry_count = 0
+                announcement.telegram_next_retry = None
+                announcement.telegram_error = None
+
+                session.commit()
+                logger.info(
+                    f"Telegram статус анонса {announcement_id} сброшен "
+                    f"(было: sent={old_status}, retries={old_retries})"
+                )
+                return True
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка сброса Telegram статуса: {e}")
+                return False
 
     def get_announcements_since(self, since: datetime) -> List[Announcement]:
         """

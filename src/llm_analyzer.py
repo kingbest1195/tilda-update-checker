@@ -20,6 +20,9 @@ _last_api_call_time = 0
 _rate_limit_lock = Lock()
 MIN_API_CALL_INTERVAL = 1.0  # секунда между запросами
 
+# Префиксы reasoning-моделей, не поддерживающих temperature
+REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3")
+
 
 # Контексты для разных категорий файлов
 CATEGORY_CONTEXTS = {
@@ -118,6 +121,28 @@ class LLMAnalyzer:
                 time.sleep(sleep_time)
             _last_api_call_time = time.time()
 
+    def _build_api_kwargs(self, messages, max_tokens=None, response_format=None):
+        """Собрать kwargs для OpenAI API с учётом ограничений модели.
+
+        Reasoning-модели (gpt-5*, o1*, o3*) не поддерживают параметр temperature.
+        """
+        kwargs = {
+            "model": config.OPENAI_MODEL,
+            "messages": messages,
+        }
+        if response_format:
+            kwargs["response_format"] = response_format
+        if max_tokens:
+            kwargs["max_completion_tokens"] = max_tokens
+
+        # Reasoning-модели не поддерживают temperature
+        model_lower = config.OPENAI_MODEL.lower()
+        if not model_lower.startswith(REASONING_MODEL_PREFIXES):
+            if config.OPENAI_TEMPERATURE is not None:
+                kwargs["temperature"] = config.OPENAI_TEMPERATURE
+
+        return kwargs
+
     def analyze_change(self, change_info: Dict) -> Optional[Dict]:
         """
         Проанализировать изменение через LLM
@@ -152,16 +177,15 @@ class LLMAnalyzer:
             self._wait_for_rate_limit()
 
             # Отправить запрос к OpenAI
-            response = self.client.chat.completions.create(
-                model=config.OPENAI_MODEL,
+            api_kwargs = self._build_api_kwargs(
                 messages=[
                     {"role": "system", "content": config.SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
+                max_tokens=config.OPENAI_MAX_TOKENS,
                 response_format={"type": "json_object"},
-                temperature=config.OPENAI_TEMPERATURE,
-                max_completion_tokens=config.OPENAI_MAX_TOKENS
             )
+            response = self.client.chat.completions.create(**api_kwargs)
             
             # Извлечь ответ
             content = response.choices[0].message.content
@@ -557,16 +581,15 @@ class LLMAnalyzer:
             try:
                 self._wait_for_rate_limit()
 
-                response = self.client.chat.completions.create(
-                    model=config.OPENAI_MODEL,
+                api_kwargs = self._build_api_kwargs(
                     messages=[
                         {"role": "system", "content": config.SYSTEM_PROMPT},
                         {"role": "user", "content": prompt}
                     ],
+                    max_tokens=500,
                     response_format={"type": "json_object"},
-                    temperature=config.OPENAI_TEMPERATURE,
-                    max_completion_tokens=500
                 )
+                response = self.client.chat.completions.create(**api_kwargs)
 
                 content = response.choices[0].message.content
                 data = json.loads(content)
@@ -614,16 +637,15 @@ class LLMAnalyzer:
 
         try:
             self._wait_for_rate_limit()
-            response = self.client.chat.completions.create(
-                model=config.OPENAI_MODEL,
+            api_kwargs = self._build_api_kwargs(
                 messages=[
                     {"role": "system", "content": config.DIGEST_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
+                max_tokens=config.OPENAI_DIGEST_MAX_TOKENS,
                 response_format={"type": "json_object"},
-                temperature=config.OPENAI_TEMPERATURE,
-                max_completion_tokens=config.OPENAI_DIGEST_MAX_TOKENS
             )
+            response = self.client.chat.completions.create(**api_kwargs)
             content = response.choices[0].message.content
             data = json.loads(content)
 

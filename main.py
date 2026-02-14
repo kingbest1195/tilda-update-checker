@@ -940,8 +940,11 @@ def show_telegram_status():
         print(f"📬 Всего анонсов: {stats['total']}")
         print(f"✅ Отправлено: {stats['sent']}")
         print(f"⏳ В очереди: {stats['pending']}")
-        print(f"❌ Неудачно: {stats['failed']}")
+        print(f"❌ Неудачно (retry): {stats['failed']}")
+        print(f"🚫 Permanently failed: {stats['permanently_failed']}")
         print(f"📈 Процент успеха: {stats['success_rate']:.1f}%")
+        if stats['permanently_failed'] > 0:
+            print(f"\n💡 Совет: используйте --reset-telegram <ID> для сброса permanently failed анонсов")
         print("=" * 80)
 
         # Показать ожидающие анонсы
@@ -972,6 +975,24 @@ def handle_retry_telegram():
         sys.exit(1)
 
     retry_pending_telegrams()
+
+
+def handle_reset_telegram(announcement_id: int):
+    """Сбросить Telegram статус конкретного анонса"""
+    logger.info(f"🔄 Сброс Telegram статуса для анонса ID={announcement_id}")
+
+    if not init_database_with_health_check():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+
+    success = db.reset_telegram_status(announcement_id)
+
+    if success:
+        print(f"\n✅ Telegram статус анонса ID={announcement_id} сброшен")
+        print("   Анонс будет повторно отправлен при следующем retry цикле.\n")
+    else:
+        print(f"\n❌ Не удалось сбросить статус анонса ID={announcement_id}")
+        print("   Проверьте, что анонс с таким ID существует.\n")
 
 
 def test_telegram_topics():
@@ -1097,6 +1118,7 @@ def main():
   # Telegram команды
   %(prog)s --telegram-status                # Статистика Telegram отправок
   %(prog)s --retry-telegram                 # Повторить неудачные отправки
+  %(prog)s --reset-telegram 18              # Сбросить статус анонса для повторной отправки
   %(prog)s --test-telegram-topics           # Тестировать все Telegram топики
         """
     )
@@ -1192,6 +1214,13 @@ def main():
         help="Тестировать все Telegram топики (General, Alerts, Digest, Discovery)"
     )
 
+    parser.add_argument(
+        "--reset-telegram",
+        type=int,
+        metavar="ID",
+        help="Сбросить Telegram статус анонса для повторной отправки"
+    )
+
     # Автодобавление
     parser.add_argument(
         "--auto-add",
@@ -1247,6 +1276,8 @@ def main():
         handle_retry_telegram()
     elif args.test_telegram_topics:
         test_telegram_topics()
+    elif args.reset_telegram:
+        handle_reset_telegram(args.reset_telegram)
     elif args.auto_add:
         handle_auto_add()
     else:

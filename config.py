@@ -14,9 +14,13 @@ BASE_DIR = Path(__file__).parent
 # OpenAI Configuration
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # GPT-5 - самая мощная модель 2026
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
+_temp = os.getenv("OPENAI_TEMPERATURE", "0.3")
+OPENAI_TEMPERATURE = float(_temp) if _temp else None
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "3000"))  # Увеличено с 500 до 3000
 OPENAI_DIGEST_MAX_TOKENS = int(os.getenv("OPENAI_DIGEST_MAX_TOKENS", "4000"))  # Для дайджест-сводки
+
+# Telegram retry configuration
+MAX_TELEGRAM_RETRIES = int(os.getenv("MAX_TELEGRAM_RETRIES", "10"))
 
 # Database Configuration
 DATABASE_PATH = os.getenv("DATABASE_PATH", "data/tilda_checker.db")
