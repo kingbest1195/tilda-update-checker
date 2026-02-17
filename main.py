@@ -311,14 +311,16 @@ def retry_pending_telegrams():
 
         for announcement in pending:
             try:
-                # Отправить content как простое сообщение
-                # (в БД уже хранится отформатированный текст)
-                message = f"🔔 *{announcement.title}*\n\n{announcement.content}"
+                # Отправить content как простой текст без Markdown-разметки:
+                # announcement.content хранит LLM-текст, который может содержать
+                # CSS-селекторы (*), символы подчёркивания и другие символы,
+                # ломающие Telegram Markdown-парсер (ошибка 400 "can't parse entities").
+                message = f"🔔 {announcement.title}\n\n{announcement.content}"
 
-                # Попытка отправки
+                # Попытка отправки без parse_mode (plain text)
                 success = notifier._send_message(
                     message,
-                    parse_mode="Markdown",
+                    parse_mode=None,
                     thread_id=notifier.thread_id
                 )
 
@@ -694,6 +696,15 @@ def run_daemon():
 
             if success:
                 logger.info("✅ Deployment notification отправлен в Telegram")
+                # Telegram работает — сбрасываем permanently failed анонсы,
+                # чтобы они были повторно отправлены при старте после фиксов
+                reset_count = db.reset_all_permanently_failed()
+                if reset_count > 0:
+                    logger.info(
+                        f"🔄 Сброшено {reset_count} permanently failed анонсов. "
+                        "Запуск немедленной повторной отправки..."
+                    )
+                    retry_pending_telegrams()
             else:
                 logger.warning(f"⚠️ Не удалось отправить deployment notification: {notifier.last_error}")
         else:
@@ -1017,7 +1028,7 @@ def test_telegram_topics():
     # Тест 1: General топик
     print("\nТест 1/4: General топик (thread_id={})".format(notifier.thread_id or 'None'))
     success_1 = notifier._send_message(
-        "🧪 **Тест General топика**\n\nЭто тестовое сообщение в основной топик для анонсов.",
+        "🧪 *Тест General топика*\n\nЭто тестовое сообщение в основной топик для анонсов.",
         thread_id=notifier.thread_id
     )
     print("   {}".format("✅ Отправлено" if success_1 else f"❌ Ошибка: {notifier.last_error}"))
@@ -1025,7 +1036,7 @@ def test_telegram_topics():
     # Тест 2: Alerts топик
     print("\nТест 2/4: Alerts топик (thread_id={})".format(notifier.alerts_thread_id or 'None'))
     success_2 = notifier._send_message(
-        "🧪 **Тест Alerts топика**\n\nЭто тестовое сообщение в топик для алертов о версиях и миграциях.",
+        "🧪 *Тест Alerts топика*\n\nЭто тестовое сообщение в топик для алертов о версиях и миграциях.",
         thread_id=notifier.alerts_thread_id
     )
     print("   {}".format("✅ Отправлено" if success_2 else f"❌ Ошибка: {notifier.last_error}"))

@@ -34,6 +34,19 @@ def sanitize_url_for_logging(url: str) -> str:
     return re.sub(r'bot\d+:[A-Za-z0-9_-]+/', 'bot***HIDDEN***/', url)
 
 
+def escape_markdown(text: str) -> str:
+    """
+    Экранировать символы, которые ломают Telegram legacy Markdown.
+    Заменяет * и ` на безопасные аналоги, чтобы CSS-селекторы и
+    технические тексты от LLM не вызывали ошибку парсинга.
+    """
+    if not text:
+        return text
+    # * в CSS-селекторах (.t-form__errorbox-*) трактуется как Markdown тег
+    # Заменяем на среднюю точку (·) — визуально схожий безопасный символ
+    return text.replace('*', '·').replace('`', "'")
+
+
 class TelegramNotifier:
     """Класс для отправки уведомлений в Telegram"""
 
@@ -234,21 +247,25 @@ class TelegramNotifier:
         category = announcement.get('category', 'unknown')
         category_emoji = CATEGORY_EMOJI.get(category, '📦')
         
-        message = f"""🔔 **Обновление Tilda** | {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        description = escape_markdown(announcement.get('description', 'Нет описания'))
+        user_impact = escape_markdown(announcement.get('user_impact', 'Не указано'))
+        recommendations = escape_markdown(announcement.get('recommendations', 'Действий не требуется'))
 
-{priority_emoji} **{severity}**
+        message = f"""🔔 *Обновление Tilda* | {datetime.now().strftime('%d.%m.%Y %H:%M')}
 
-{category_emoji} **{category.upper()}**
+{priority_emoji} *{severity}*
+
+{category_emoji} *{category.upper()}*
 • {announcement.get('title', 'Без заголовка')}
 
-📝 **Описание:**
-{announcement.get('description', 'Нет описания')}
+📝 *Описание:*
+{description}
 
-👥 **Влияние:**
-{announcement.get('user_impact', 'Не указано')}
+👥 *Влияние:*
+{user_impact}
 
-💡 **Рекомендации:**
-{announcement.get('recommendations', 'Действий не требуется')}
+💡 *Рекомендации:*
+{recommendations}
 
 ━━━━━━━━━━━━━━━━
 🔗 Файл: `{announcement.get('url', 'N/A')}`
@@ -429,12 +446,12 @@ class TelegramNotifier:
         Returns:
             Отформатированное сообщение
         """
-        message = f"""🔍 **Discovery Mode Report** | {datetime.now().strftime('%d.%m.%Y')}
+        message = f"""🔍 *Discovery Mode Report* | {datetime.now().strftime('%d.%m.%Y')}
 
-Обнаружено новых файлов: **{len(discovered_files)}**
+Обнаружено новых файлов: *{len(discovered_files)}*
 
 """
-        
+
         # Группировка по категориям
         by_category = {}
         for file_info in discovered_files:
@@ -442,11 +459,11 @@ class TelegramNotifier:
             if cat not in by_category:
                 by_category[cat] = []
             by_category[cat].append(file_info)
-        
+
         # Вывод по категориям
         for category, files in sorted(by_category.items()):
             category_emoji = CATEGORY_EMOJI.get(category, '📦')
-            message += f"{category_emoji} **{category.upper()}** ({len(files)} файлов)\n"
+            message += f"{category_emoji} *{category.upper()}* ({len(files)} файлов)\n"
             
             for file_info in files[:5]:  # Максимум 5 файлов на категорию
                 filename = file_info['url'].split('/')[-1]
@@ -475,13 +492,13 @@ class TelegramNotifier:
         priority_emoji = PRIORITY_EMOJI.get(alert_data.get('priority', 'MEDIUM'), '⚪')
         category_emoji = CATEGORY_EMOJI.get(alert_data.get('category', 'unknown'), '📦')
         
-        message = f"""🆕 **НОВАЯ ВЕРСИЯ ОБНАРУЖЕНА**
+        message = f"""🆕 *НОВАЯ ВЕРСИЯ ОБНАРУЖЕНА*
 
 📦 Файл: `{alert_data['base_name']}`
-{category_emoji} Категория: **{alert_data.get('category', 'unknown').upper()}** ({priority_emoji} {alert_data.get('priority', 'MEDIUM')})
+{category_emoji} Категория: *{alert_data.get('category', 'unknown').upper()}* ({priority_emoji} {alert_data.get('priority', 'MEDIUM')})
 
 Текущая версия: {alert_data.get('current_version', 'unknown')}
-Новая версия: **{alert_data['new_version']}** ✨
+Новая версия: *{alert_data['new_version']}* ✨
 
 ⚙️ Статус миграции: {alert_data.get('migration_status', 'Автоматическая миграция запущена...')}
 ⏱ Обнаружено: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -507,12 +524,12 @@ class TelegramNotifier:
         """
         category_emoji = CATEGORY_EMOJI.get(migration_data.get('category', 'unknown'), '📦')
         
-        message = f"""✅ **МИГРАЦИЯ ЗАВЕРШЕНА**
+        message = f"""✅ *МИГРАЦИЯ ЗАВЕРШЕНА*
 
 📦 Файл: `{migration_data['base_name']}`
-{category_emoji} Категория: **{migration_data.get('category', 'unknown').upper()}**
+{category_emoji} Категория: *{migration_data.get('category', 'unknown').upper()}*
 
-{migration_data.get('old_version', 'unknown')} → **{migration_data['new_version']}**
+{migration_data.get('old_version', 'unknown')} → *{migration_data['new_version']}*
 
 ⏱ Время миграции: {migration_data.get('migration_time', 0):.2f}с
 ✅ Статус: Активна и отслеживается
@@ -534,14 +551,14 @@ class TelegramNotifier:
         """
         category_emoji = CATEGORY_EMOJI.get(migration_data.get('category', 'unknown'), '📦')
         
-        message = f"""❌ **МИГРАЦИЯ НЕ УДАЛАСЬ**
+        message = f"""❌ *МИГРАЦИЯ НЕ УДАЛАСЬ*
 
 📦 Файл: `{migration_data['base_name']}`
-{category_emoji} Категория: **{migration_data.get('category', 'unknown').upper()}**
+{category_emoji} Категория: *{migration_data.get('category', 'unknown').upper()}*
 
 {migration_data.get('old_version', 'unknown')} → {migration_data['new_version']}
 
-❌ Ошибка: {migration_data.get('error', 'Unknown error')}
+❌ Ошибка: {escape_markdown(migration_data.get('error', 'Unknown error'))}
 🔙 Действие: Откат к предыдущей версии
 
 ━━━━━━━━━━━━━━━━
@@ -562,15 +579,15 @@ class TelegramNotifier:
         priority_emoji = PRIORITY_EMOJI.get(file_data.get('priority', 'MEDIUM'), '⚪')
         category_emoji = CATEGORY_EMOJI.get(file_data.get('category', 'unknown'), '📦')
         
-        message = f"""⚠️ **КРИТИЧЕСКАЯ ОШИБКА 404**
+        message = f"""⚠️ *КРИТИЧЕСКАЯ ОШИБКА 404*
 
 📦 Файл: `{file_data['base_name']}`
-{category_emoji} Категория: **{file_data.get('category', 'unknown').upper()}** ({priority_emoji} {file_data.get('priority', 'MEDIUM')})
+{category_emoji} Категория: *{file_data.get('category', 'unknown').upper()}* ({priority_emoji} {file_data.get('priority', 'MEDIUM')})
 
 🔗 URL:
 `{file_data['url']}`
 
-⚠️ Последовательных 404: **{file_data.get('consecutive_count', 0)}**
+⚠️ Последовательных 404: *{file_data.get('consecutive_count', 0)}*
 🔍 Действие: Запущен Discovery Mode для поиска замены
 
 ⏱ Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -608,9 +625,10 @@ class TelegramNotifier:
             payload = {
                 "chat_id": self.chat_id,
                 "text": message,
-                "parse_mode": parse_mode,
                 "disable_web_page_preview": True
             }
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
 
             # Добавить message_thread_id только если:
             # 1. Это групповой чат (chat_id начинается с "-")
@@ -645,7 +663,14 @@ class TelegramNotifier:
         except requests.exceptions.RequestException as e:
             # Не логировать полный URL с токеном в ошибках
             self.last_error = f"HTTP Error: {type(e).__name__}"
-            logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {self.last_error}")
+            # Если есть сохранённый ответ от Telegram API — показать реальную ошибку
+            if self.last_response and not self.last_response.get('ok'):
+                tg_code = self.last_response.get('error_code', 'N/A')
+                tg_desc = self.last_response.get('description', 'Unknown')
+                self.last_error = f"[{tg_code}] {tg_desc}"
+                logger.error(f"❌ Telegram API ошибка: {self.last_error}")
+            else:
+                logger.error(f"❌ Ошибка HTTP при отправке в Telegram: {self.last_error}")
             return False
         except Exception as e:
             self.last_error = f"Unexpected error: {type(e).__name__}"

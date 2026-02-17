@@ -1244,6 +1244,41 @@ class Database:
                 logger.error(f"Ошибка сброса Telegram статуса: {e}")
                 return False
 
+    def reset_all_permanently_failed(self) -> int:
+        """
+        Сбросить все permanently failed анонсы (telegram_sent=-1) для повторной отправки.
+        Вызывается при старте, если Telegram соединение успешно установлено.
+
+        Returns:
+            Количество сброшенных анонсов
+        """
+        with self.SessionLocal() as session:
+            try:
+                results = session.query(Announcement).filter(
+                    Announcement.telegram_sent == -1
+                ).all()
+
+                count = len(results)
+                if count == 0:
+                    return 0
+
+                for ann in results:
+                    ann.telegram_sent = 0
+                    ann.telegram_retry_count = 0
+                    ann.telegram_next_retry = None
+                    ann.telegram_error = None
+
+                session.commit()
+                logger.info(
+                    f"🔄 Сброшено {count} permanently failed анонсов для повторной отправки"
+                )
+                return count
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка сброса permanently failed анонсов: {e}")
+                return 0
+
     def get_announcements_since(self, since: datetime) -> List[Announcement]:
         """
         Получить анонсы с определенной даты
