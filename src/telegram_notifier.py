@@ -275,9 +275,9 @@ class TelegramNotifier:
         trend = announcement.get('trend')
         feature = announcement.get('feature')
         if trend:
-            message += f"\n📈 **Тренд:** {trend}"
+            message += f"\n📈 *Тренд:* {escape_markdown(trend)}"
         if feature:
-            message += f"\n🎯 **Фича:** {feature}"
+            message += f"\n🎯 *Фича:* {escape_markdown(feature)}"
 
         return message
     
@@ -296,11 +296,11 @@ class TelegramNotifier:
 
         # LLM-сводка дня (если доступна)
         if digest_analysis:
-            summary = digest_analysis.get('summary', '')
+            summary = escape_markdown(digest_analysis.get('summary', ''))
             if summary:
                 message += f"📈 *Сводка дня:*\n{summary}\n\n"
 
-            attention = digest_analysis.get('attention')
+            attention = escape_markdown(digest_analysis.get('attention') or '')
             if attention:
                 message += f"⚠️ *Обратить внимание:* {attention}\n\n"
         else:
@@ -348,7 +348,7 @@ class TelegramNotifier:
 
         # Тренд (из LLM или из данных)
         if digest_analysis and digest_analysis.get('trend'):
-            message += f"\n📈 *Тренд:* {digest_analysis['trend']}\n"
+            message += f"\n📈 *Тренд:* {escape_markdown(digest_analysis['trend'])}\n"
 
         message += "\n━━━━━━━━━━━━━━━━\n"
         message += f"📊 Всего: {len(announcements)} изменений за 24ч\n"
@@ -376,12 +376,13 @@ class TelegramNotifier:
             for ann in cat_items:
                 title = ann.get('title', 'Без заголовка')
                 filename = title.split(' - ')[0] if ' - ' in title else title.split('/')[-1]
-                desc = ann.get('description', '')
+                desc = escape_markdown(ann.get('description', ''))
                 result += f"  • {self._smart_truncate(filename, 40)}\n"
                 if desc:
                     result += f"    {self._smart_truncate(desc, 120)}\n"
                 if show_impact and ann.get('user_impact'):
-                    result += f"    👥 {self._smart_truncate(ann['user_impact'], 100)}\n"
+                    impact = escape_markdown(ann['user_impact'])
+                    result += f"    👥 {self._smart_truncate(impact, 100)}\n"
             result += "\n"
         return result
 

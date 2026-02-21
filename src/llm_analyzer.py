@@ -592,6 +592,11 @@ class LLMAnalyzer:
                 response = self.client.chat.completions.create(**api_kwargs)
 
                 content = response.choices[0].message.content
+                if not content or not content.strip():
+                    logger.warning(
+                        f"Batch-анализ для {category}: OpenAI вернул пустой ответ, пропускаем"
+                    )
+                    continue
                 data = json.loads(content)
                 batch_results[category] = {
                     'trend': data.get('trend'),
@@ -601,6 +606,11 @@ class LLMAnalyzer:
 
                 logger.info(f"Batch-анализ для {category}: trend='{data.get('trend', 'N/A')}'")
 
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"Ошибка batch-анализа для {category}: JSON parse error — {e}. "
+                    f"Ответ (первые 200 символов): {repr((content or '')[:200])}"
+                )
             except Exception as e:
                 logger.warning(f"Ошибка batch-анализа для {category}: {e}")
                 continue
@@ -647,6 +657,9 @@ class LLMAnalyzer:
             )
             response = self.client.chat.completions.create(**api_kwargs)
             content = response.choices[0].message.content
+            if not content or not content.strip():
+                logger.warning("LLM дайджест: OpenAI вернул пустой ответ")
+                return None
             data = json.loads(content)
 
             logger.info("LLM дайджест-анализ завершён")
@@ -657,6 +670,12 @@ class LLMAnalyzer:
                 'trend': data.get('trend'),
                 'attention': data.get('attention'),
             }
+        except json.JSONDecodeError as e:
+            logger.warning(
+                f"Ошибка LLM-анализа дайджеста: JSON parse error — {e}. "
+                f"Ответ (первые 200 символов): {repr((content or '')[:200])}"
+            )
+            return None
         except Exception as e:
             logger.warning(f"Ошибка LLM-анализа дайджеста: {e}")
             return None
