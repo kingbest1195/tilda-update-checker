@@ -25,6 +25,7 @@ PATTERN_CATEGORIES = {
     r"tilda-(quiz|cards|stories|slider|popup|slds|zoom|video|map|img-select|beforeafter|menu-burger|menusub|videoplaylist)": "ui_components",
     r"tilda-(scripts|grid|forms|animation|cover|menu-\d|lazyload|events|polyfill|fallback)": "core",
     r"tilda-(phone|conditional|payment|ratescale|step-manager|widget|lk|skiplink|stat|error|performance|table|paint|redactor|highlight)": "utilities",
+    r"tilda-blocks-page\d+": "page_bundles",
 }
 
 # Приоритеты для категорий
@@ -35,6 +36,7 @@ CATEGORY_PRIORITIES = {
     "zero_block": "HIGH",
     "ui_components": "MEDIUM",
     "utilities": "LOW",
+    "page_bundles": "HIGH",
     "unknown": "MEDIUM"
 }
 
@@ -121,6 +123,13 @@ class FileDiscovery:
         
         return tracked
     
+    def _normalize_url(self, url: str) -> str:
+        """Убрать ?t=timestamp cache-busters из URL для стабильного мониторинга."""
+        parsed = urlparse(url)
+        if parsed.query and re.match(r'^t=\d+$', parsed.query):
+            return parsed._replace(query='').geturl()
+        return url
+
     def _scan_page(self, page_url: str, already_tracked: Set[str]) -> List[Dict]:
         """
         Сканировать страницу на наличие ссылок на Tilda файлы
@@ -144,13 +153,15 @@ class FileDiscovery:
             # Script теги
             for script in soup.find_all('script', src=True):
                 url = urljoin(page_url, script['src'])
+                url = self._normalize_url(url)
                 if self._is_tilda_url(url):
                     discovered_urls.add(url)
-            
+
             # Link теги (CSS)
             for link in soup.find_all('link', href=True):
                 if link.get('rel') == ['stylesheet'] or link['href'].endswith('.css'):
                     url = urljoin(page_url, link['href'])
+                    url = self._normalize_url(url)
                     if self._is_tilda_url(url):
                         discovered_urls.add(url)
             
@@ -185,12 +196,15 @@ class FileDiscovery:
         if not any(tilda_domain in domain for tilda_domain in TILDA_DOMAINS):
             return False
 
-        # Исключить page-specific бандлы (tilda-blocks-page*)
+        # Исключить page-specific бандлы, кроме whitelisted канарейка-страниц
         path = parsed.path
         if 'tilda-blocks-page' in path:
+            match = re.search(r'tilda-blocks-page(\d+)', path)
+            if match and match.group(1) in config.CANARY_PAGE_IDS:
+                return True  # Разрешённый канарейка-бандл
             return False
 
-        # Исключить URL с query string timestamps (?t=...)
+        # Исключить URL с query string timestamps (?t=...) — нормализация должна быть выше
         if parsed.query and re.match(r'^t=\d+$', parsed.query):
             return False
 
@@ -296,12 +310,15 @@ class FileDiscovery:
         for df in undiscovered:
             url = df.url
 
-            # Фильтр: page-specific бандлы
+            # Фильтр: page-specific бандлы (кроме whitelisted канарейка-страниц)
             if 'tilda-blocks-page' in url:
-                db.mark_discovered_as_tracked(df.id)
-                stats['skipped'] += 1
-                logger.info(f"⏭️ Пропущен page-specific бандл: {url}")
-                continue
+                match = re.search(r'tilda-blocks-page(\d+)', url)
+                if not (match and match.group(1) in config.CANARY_PAGE_IDS):
+                    db.mark_discovered_as_tracked(df.id)
+                    stats['skipped'] += 1
+                    logger.info(f"⏭️ Пропущен page-specific бандл: {url}")
+                    continue
+                # Canary bundle — разрешаем продолжить обработку
 
             # Фильтр: URL с query string (cache-busters)
             parsed = urlparse(url)

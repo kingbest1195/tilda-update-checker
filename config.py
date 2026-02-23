@@ -177,6 +177,10 @@ for category_data in TILDA_MONITORED_FILES.values():
 # Автодобавление обнаруженных файлов в мониторинг
 AUTO_ADD_DISCOVERED = os.getenv("AUTO_ADD_DISCOVERED", "true").lower() == "true"
 
+# Canary page bundles: ID страниц, чьи page-bundle файлы разрешены для мониторинга
+_canary_ids = os.getenv("CANARY_PAGE_IDS", "")
+CANARY_PAGE_IDS = [pid.strip() for pid in _canary_ids.split(",") if pid.strip()]
+
 # HTTP Configuration
 REQUEST_TIMEOUT = 30  # секунды
 REQUEST_RETRY_COUNT = 3
