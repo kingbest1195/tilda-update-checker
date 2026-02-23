@@ -12,7 +12,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 import config
-from src.database import db
+from src.database import db, TrackedFile
 
 logger = logging.getLogger(__name__)
 
@@ -332,8 +332,8 @@ class CDNFetcher:
             # Обновить base_name и version
             session = db.get_session()
             try:
-                tf = session.query(db.TrackedFile).filter(
-                    db.TrackedFile.id == tracked_file.id
+                tf = session.query(TrackedFile).filter(
+                    TrackedFile.id == tracked_file.id
                 ).first()
                 if tf:
                     tf.base_name = parsed['base_name']
