@@ -241,6 +241,68 @@ class MigrationMetrics(Base):
         return f"<MigrationMetrics(date={self.date}, discovered={self.total_versions_discovered}, success={self.successful_migrations})>"
 
 
+class TildaBlock(Base):
+    """Модель блока из каталога Tilda"""
+
+    __tablename__ = "block_catalog"
+
+    id = Column(Integer, primary_key=True)
+    block_id = Column(String(20), unique=True, nullable=False, index=True)  # ID из каталога ("18")
+    cod = Column(String(50), index=True)  # Код блока ("CR01")
+    block_type = Column(String(20), index=True)  # Категория ("1")
+    title = Column(String(500))
+    descr = Column(Text)
+    icon = Column(String(500))  # URL иконки/превью
+
+    # Метаданные
+    parent_tpl_id = Column(String(20))
+    whocansee = Column(String(50), default="")  # "" = публичный, "testers" = бета
+    variation = Column(Integer, default=0)
+    has_block_background = Column(Integer, default=0)
+    disable_for_plan0 = Column(Integer, default=0)
+    fields = Column(Text)  # JSON строка с полями блока
+
+    # Временные метки
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_changed_at = Column(DateTime)
+
+    # Удаление
+    is_removed = Column(Integer, default=0)  # 0 = активен, 1 = удалён
+    removed_at = Column(DateTime)
+
+    # Хеш для детекции изменений
+    data_hash = Column(String(64))  # SHA-256
+
+    def __repr__(self):
+        return f"<TildaBlock(block_id='{self.block_id}', cod='{self.cod}', title='{self.title}')>"
+
+
+class BlockCatalogChange(Base):
+    """Модель изменения в каталоге блоков"""
+
+    __tablename__ = "block_catalog_changes"
+
+    id = Column(Integer, primary_key=True)
+    block_id = Column(String(20), nullable=False, index=True)
+    cod = Column(String(50))
+    change_type = Column(String(50), nullable=False)  # new_block, removed_block, visibility_change, field_change
+    field_name = Column(String(100))  # Какое поле изменилось
+    old_value = Column(Text)
+    new_value = Column(Text)
+    detected_at = Column(DateTime, default=datetime.utcnow)
+
+    # Статус отправки в Telegram (паттерн из Announcement)
+    telegram_sent = Column(Integer, default=0)  # 0 = не отправлено, 1 = отправлено
+    telegram_error = Column(Text)
+
+    # LLM-анализ превью (для new_block и visibility_change)
+    llm_analysis = Column(Text)
+
+    def __repr__(self):
+        return f"<BlockCatalogChange(block_id='{self.block_id}', type='{self.change_type}')>"
+
+
 class Database:
     """Класс для работы с базой данных"""
     
@@ -333,7 +395,7 @@ class Database:
 
             required_tables = ['files', 'changes', 'announcements', 'file_versions',
                              'discovered_files', 'version_alerts', 'migration_metrics',
-                             'telegram_logs']
+                             'telegram_logs', 'block_catalog', 'block_catalog_changes']
 
             missing_tables = [t for t in required_tables if t not in table_names]
 
@@ -1278,6 +1340,104 @@ class Database:
                 session.rollback()
                 logger.error(f"Ошибка сброса permanently failed анонсов: {e}")
                 return 0
+
+    # ====== Методы для каталога блоков ======
+
+    def get_all_blocks(self) -> List[TildaBlock]:
+        """Получить все блоки из каталога"""
+        with self.SessionLocal() as session:
+            return session.query(TildaBlock).order_by(TildaBlock.cod).all()
+
+    def get_active_blocks(self) -> List[TildaBlock]:
+        """Получить все активные (не удалённые) блоки"""
+        with self.SessionLocal() as session:
+            return session.query(TildaBlock).filter_by(is_removed=0).order_by(TildaBlock.cod).all()
+
+    def get_block_by_id(self, block_id: str) -> Optional[TildaBlock]:
+        """Получить блок по block_id"""
+        with self.SessionLocal() as session:
+            return session.query(TildaBlock).filter_by(block_id=block_id).first()
+
+    def save_block(self, block_data: dict) -> TildaBlock:
+        """Сохранить или обновить блок в каталоге"""
+        with self.SessionLocal() as session:
+            try:
+                block = session.query(TildaBlock).filter_by(
+                    block_id=block_data['block_id']
+                ).first()
+
+                if block:
+                    for key, value in block_data.items():
+                        if key != 'block_id' and hasattr(block, key):
+                            setattr(block, key, value)
+                    block.last_seen_at = datetime.utcnow()
+                else:
+                    block = TildaBlock(**block_data)
+                    block.first_seen_at = datetime.utcnow()
+                    block.last_seen_at = datetime.utcnow()
+                    session.add(block)
+
+                session.commit()
+                session.refresh(block)
+                return block
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при сохранении блока: {e}")
+                raise
+
+    def save_block_change(self, data: dict) -> BlockCatalogChange:
+        """Сохранить изменение в каталоге блоков"""
+        with self.SessionLocal() as session:
+            try:
+                change = BlockCatalogChange(**data)
+                session.add(change)
+                session.commit()
+                session.refresh(change)
+                return change
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при сохранении изменения блока: {e}")
+                raise
+
+    def get_pending_block_notifications(self) -> List[BlockCatalogChange]:
+        """Получить неотправленные уведомления о блоках"""
+        with self.SessionLocal() as session:
+            return session.query(BlockCatalogChange).filter_by(
+                telegram_sent=0
+            ).order_by(BlockCatalogChange.detected_at.desc()).all()
+
+    def mark_block_notification_sent(self, change_id: int, success: bool, error: str = None):
+        """Отметить уведомление о блоке как отправленное"""
+        with self.SessionLocal() as session:
+            try:
+                change = session.query(BlockCatalogChange).filter_by(id=change_id).first()
+                if change:
+                    change.telegram_sent = 1 if success else 0
+                    change.telegram_error = error
+                    session.commit()
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при обновлении статуса уведомления: {e}")
+
+    def get_recent_block_changes(self, limit: int = 50) -> List[BlockCatalogChange]:
+        """Получить последние изменения каталога блоков"""
+        with self.SessionLocal() as session:
+            return session.query(BlockCatalogChange).order_by(
+                BlockCatalogChange.detected_at.desc()
+            ).limit(limit).all()
+
+    def mark_block_removed(self, block_id: str):
+        """Пометить блок как удалённый"""
+        with self.SessionLocal() as session:
+            try:
+                block = session.query(TildaBlock).filter_by(block_id=block_id).first()
+                if block:
+                    block.is_removed = 1
+                    block.removed_at = datetime.utcnow()
+                    session.commit()
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Ошибка при пометке блока как удалённого: {e}")
 
     def get_announcements_since(self, since: datetime) -> List[Announcement]:
         """

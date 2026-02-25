@@ -152,6 +152,117 @@ class TelegramNotifier:
             logger.error(f"Ошибка при отправке отчета Discovery: {e}", exc_info=True)
             return False
     
+    def send_block_catalog_report(self, report: dict) -> bool:
+        """
+        Отправить отчёт о изменениях каталога блоков в Discovery топик.
+
+        Args:
+            report: Результат check_catalog() из BlockCatalogMonitor
+
+        Returns:
+            True если успешно отправлено
+        """
+        if not self.enabled:
+            return False
+
+        new_blocks = report.get('new_blocks', [])
+        removed_blocks = report.get('removed_blocks', [])
+        changed_blocks = report.get('changed_blocks', [])
+
+        if not new_blocks and not removed_blocks and not changed_blocks:
+            return False
+
+        try:
+            message = self._format_block_catalog_report(report)
+            return self._send_message(message, parse_mode=None, thread_id=self.discovery_thread_id)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке отчёта о блоках: {e}", exc_info=True)
+            return False
+
+    def _format_block_catalog_report(self, report: dict) -> str:
+        """Форматировать отчёт об изменениях каталога блоков"""
+        new_blocks = report.get('new_blocks', [])
+        removed_blocks = report.get('removed_blocks', [])
+        changed_blocks = report.get('changed_blocks', [])
+
+        parts = []
+        parts.append("🧱 ИЗМЕНЕНИЯ В КАТАЛОГЕ БЛОКОВ TILDA")
+        parts.append("=" * 40)
+
+        # 1. Visibility changes (testers→"") — самый важный
+        visibility_releases = []
+        for item in changed_blocks:
+            for ch in item.get('changes', []):
+                if ch.get('change_type') == 'visibility_change' and ch.get('old_value') == 'testers' and ch.get('new_value') == '':
+                    bd = item['block_data']
+                    entry = f"  РЕЛИЗ: {bd['cod']} — {bd['title']}"
+                    if ch.get('llm_analysis'):
+                        try:
+                            import json
+                            analysis = json.loads(ch['llm_analysis'])
+                            summary = analysis.get('summary', '')
+                            if summary:
+                                entry += f"\n    {summary[:150]}"
+                        except Exception:
+                            pass
+                    visibility_releases.append(entry)
+
+        if visibility_releases:
+            parts.append("")
+            parts.append(f"🎉 Блоки вышли из беты ({len(visibility_releases)}):")
+            parts.extend(visibility_releases)
+
+        # 2. Новые бета-блоки
+        beta_new = [b for b in new_blocks if b.get('whocansee') == 'testers']
+        if beta_new:
+            parts.append("")
+            parts.append(f"🧪 Новые бета-блоки ({len(beta_new)}):")
+            for b in beta_new[:10]:
+                parts.append(f"  {b['cod']} — {b['title']}")
+
+        # 3. Новые публичные блоки
+        public_new = [b for b in new_blocks if b.get('whocansee') != 'testers']
+        if public_new:
+            parts.append("")
+            parts.append(f"🆕 Новые публичные блоки ({len(public_new)}):")
+            for b in public_new[:10]:
+                parts.append(f"  {b['cod']} — {b['title']}")
+
+        # 4. Удалённые блоки
+        if removed_blocks:
+            parts.append("")
+            parts.append(f"🗑 Удалённые блоки ({len(removed_blocks)}):")
+            for b in removed_blocks[:10]:
+                parts.append(f"  {b.get('cod', 'N/A')} — {b.get('title', 'N/A')}")
+
+        # 5. Прочие изменения полей (кратко)
+        other_changes = []
+        for item in changed_blocks:
+            non_vis = [ch for ch in item.get('changes', []) if ch.get('change_type') == 'field_change']
+            if non_vis:
+                bd = item['block_data']
+                fields = [ch.get('field_name', '?') for ch in non_vis]
+                other_changes.append(f"  {bd['cod']}: изменены {', '.join(fields)}")
+
+        if other_changes:
+            parts.append("")
+            parts.append(f"📝 Прочие изменения ({len(other_changes)}):")
+            parts.extend(other_changes[:10])
+            if len(other_changes) > 10:
+                parts.append(f"  ... и ещё {len(other_changes) - 10}")
+
+        parts.append("")
+        total = len(new_blocks) + len(removed_blocks) + len(changed_blocks)
+        parts.append(f"Итого: {total} изменений в каталоге")
+
+        message = "\n".join(parts)
+
+        # Обрезка если > 4000
+        if len(message) > 4000:
+            message = message[:3950] + "\n\n... (сообщение обрезано)"
+
+        return message
+
     def send_version_alert(self, alert_data: Dict) -> bool:
         """
         Отправить алерт о новой версии файла

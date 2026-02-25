@@ -680,6 +680,86 @@ class LLMAnalyzer:
             logger.warning(f"Ошибка LLM-анализа дайджеста: {e}")
             return None
 
+    def analyze_block_preview(self, block_data: dict) -> Optional[Dict]:
+        """
+        Анализ превью блока через Vision API (gpt-4o).
+
+        Args:
+            block_data: Данные блока (block_id, cod, title, descr, icon, whocansee)
+
+        Returns:
+            Словарь с анализом или None
+        """
+        if not self.client:
+            return None
+
+        block_id = block_data.get('block_id', '')
+        icon = block_data.get('icon', '')
+
+        # Формируем URL превью
+        if icon and not icon.startswith('http'):
+            preview_url = f"https://static.tildacdn.com/lib/tscripts/tplicons/{icon}"
+        elif not icon:
+            preview_url = f"https://static.tildacdn.com/lib/tscripts/tplicons/tpl_{block_id}.png"
+        else:
+            preview_url = icon
+
+        visibility = "бета-тестирование (testers)" if block_data.get('whocansee') == 'testers' else "публичный"
+
+        prompt = config.BLOCK_ANALYSIS_PROMPT.format(
+            cod=block_data.get('cod', 'N/A'),
+            title=block_data.get('title', 'N/A'),
+            descr=block_data.get('descr', 'N/A'),
+            visibility=visibility,
+        )
+
+        try:
+            self._wait_for_rate_limit()
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": preview_url, "detail": "low"}
+                        }
+                    ]
+                }
+            ]
+
+            model = config.BLOCK_ANALYSIS_MODEL
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": 1000,
+                "response_format": {"type": "json_object"},
+            }
+
+            # Для не-reasoning моделей добавляем temperature
+            if not model.lower().startswith(REASONING_MODEL_PREFIXES):
+                if config.OPENAI_TEMPERATURE is not None:
+                    kwargs["temperature"] = config.OPENAI_TEMPERATURE
+
+            response = self.client.chat.completions.create(**kwargs)
+            content = response.choices[0].message.content
+
+            if not content or not content.strip():
+                logger.warning(f"LLM block preview: пустой ответ для блока {block_data.get('cod')}")
+                return None
+
+            data = json.loads(content)
+            logger.info(f"LLM block preview анализ завершён для {block_data.get('cod')}")
+            return data
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Ошибка JSON при анализе превью блока {block_data.get('cod')}: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Ошибка анализа превью блока {block_data.get('cod')}: {e}")
+            return None
+
     def estimate_tokens(self, text: str) -> int:
         """
         Оценить количество токенов в тексте

@@ -22,6 +22,7 @@ from src.version_detector import detector as version_detector
 from src.migration_manager import manager
 from src.alert_system import alert_system
 from src.telegram_notifier import notifier
+from src.block_catalog import block_monitor
 
 
 def setup_logging():
@@ -601,6 +602,58 @@ def check_404_errors():
         logger.error(f"❌ Ошибка при проверке 404: {e}", exc_info=True)
 
 
+def check_block_catalog():
+    """Проверка каталога блоков Tilda"""
+    try:
+        logger.info("\n" + "="*80)
+        logger.info("🧱 ПРОВЕРКА КАТАЛОГА БЛОКОВ TILDA")
+        logger.info("="*80)
+
+        result = block_monitor.check_catalog()
+        block_monitor.print_changes_report(result)
+
+        # Отправить отчёт в Telegram (только если не первый запуск и есть изменения)
+        if not result.get('is_first_run') and (
+            result.get('new_blocks') or result.get('removed_blocks') or result.get('changed_blocks')
+        ):
+            if notifier and notifier.enabled:
+                logger.info("📨 Отправка отчёта о блоках в Telegram...")
+                success = notifier.send_block_catalog_report(result)
+                if success:
+                    logger.info("✅ Отчёт о блоках отправлен в Telegram")
+                else:
+                    logger.error(f"❌ Ошибка отправки отчёта о блоках: {notifier.last_error}")
+
+        logger.info("="*80 + "\n")
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при проверке каталога блоков: {e}", exc_info=True)
+
+
+def handle_check_blocks():
+    """CLI: разовая проверка каталога блоков"""
+    if not init_database_with_health_check():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+    check_block_catalog()
+
+
+def handle_show_blocks():
+    """CLI: показать текущий каталог блоков из БД"""
+    if not init_database_with_health_check():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+    block_monitor.print_catalog()
+
+
+def handle_show_block_changes(limit: int = 50):
+    """CLI: показать историю изменений каталога блоков"""
+    if not init_database_with_health_check():
+        logger.error("Не удалось инициализировать базу данных")
+        sys.exit(1)
+    block_monitor.print_changes_report(limit=limit)
+
+
 def run_daemon():
     """Запуск в режиме демона с почасовыми проверками"""
     logger.info("🚀 Запуск Tilda Update Checker в режиме демона")
@@ -665,12 +718,25 @@ def run_daemon():
             misfire_grace_time=3600
         )
 
+        # Задача 6: Ежедневная проверка каталога блоков (каждый день в 10:00)
+        if config.BLOCK_CATALOG_CHECK_ENABLED:
+            scheduler.add_job(
+                check_block_catalog,
+                'cron',
+                hour=10,
+                minute=0,
+                id='block_catalog_check',
+                misfire_grace_time=3600
+            )
+
         logger.info(f"✅ Планировщик настроен:")
         logger.info(f"   - Проверка изменений: каждые {interval_hours or 1} час(ов)")
         logger.info(f"   - Discovery Mode: каждый понедельник в 9:00")
         logger.info(f"   - Проверка 404: ежедневно в 8:00")
         logger.info(f"   - Повтор Telegram: каждые 15 минут")
         logger.info(f"   - Ежедневный дайджест: ежедневно в 22:00")
+        if config.BLOCK_CATALOG_CHECK_ENABLED:
+            logger.info(f"   - Каталог блоков: ежедневно в 10:00")
         logger.info("Нажмите Ctrl+C для остановки")
         logger.info("")
 
@@ -1123,6 +1189,11 @@ def main():
   %(prog)s --migration-status               # Статус миграций
   %(prog)s --dashboard                      # Показать dashboard
 
+  # Каталог блоков
+  %(prog)s --check-blocks                   # Проверка каталога блоков
+  %(prog)s --show-blocks                    # Показать каталог блоков из БД
+  %(prog)s --show-block-changes             # Последние изменения каталога
+
   # Автодобавление
   %(prog)s --auto-add                       # Добавить обнаруженные файлы в мониторинг
 
@@ -1239,6 +1310,25 @@ def main():
         help="Автоматически добавить все обнаруженные файлы в мониторинг"
     )
 
+    # Каталог блоков
+    parser.add_argument(
+        "--check-blocks",
+        action="store_true",
+        help="Проверить каталог блоков Tilda на изменения"
+    )
+
+    parser.add_argument(
+        "--show-blocks",
+        action="store_true",
+        help="Показать текущий каталог блоков из БД"
+    )
+
+    parser.add_argument(
+        "--show-block-changes",
+        action="store_true",
+        help="Показать последние изменения каталога блоков"
+    )
+
     # Дополнительные параметры
     parser.add_argument(
         "-n", "--number",
@@ -1291,6 +1381,12 @@ def main():
         handle_reset_telegram(args.reset_telegram)
     elif args.auto_add:
         handle_auto_add()
+    elif args.check_blocks:
+        handle_check_blocks()
+    elif args.show_blocks:
+        handle_show_blocks()
+    elif args.show_block_changes:
+        handle_show_block_changes(limit=args.number)
     else:
         parser.print_help()
         print("\n⚠️ Укажите команду для выполнения\n")
