@@ -698,7 +698,10 @@ class LLMAnalyzer:
 
         # Формируем URL превью
         if icon and not icon.startswith('http'):
-            preview_url = f"https://static.tildacdn.com/lib/tscripts/tplicons/{icon}"
+            # Берём только имя файла — поле icon может содержать путь вида /files/tplicons/tpl_2271.png
+            import os as _os
+            icon_filename = _os.path.basename(icon)
+            preview_url = f"https://static.tildacdn.com/lib/tscripts/tplicons/{icon_filename}"
         elif not icon:
             preview_url = f"https://static.tildacdn.com/lib/tscripts/tplicons/tpl_{block_id}.png"
         else:
