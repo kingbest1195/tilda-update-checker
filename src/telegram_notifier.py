@@ -34,17 +34,15 @@ def sanitize_url_for_logging(url: str) -> str:
     return re.sub(r'bot\d+:[A-Za-z0-9_-]+/', 'bot***HIDDEN***/', url)
 
 
-def escape_markdown(text: str) -> str:
+def escape_html(text: str) -> str:
     """
-    Экранировать символы, которые ломают Telegram legacy Markdown.
-    Заменяет * и ` на безопасные аналоги, чтобы CSS-селекторы и
-    технические тексты от LLM не вызывали ошибку парсинга.
+    Экранировать HTML-символы для Telegram HTML parse_mode.
+    Экранирует только &, <, > — этого достаточно для безопасной отправки
+    любого текста (LLM-описания, URL, технические строки с _ * ` и т.д.).
     """
     if not text:
         return text
-    # * в CSS-селекторах (.t-form__errorbox-*) трактуется как Markdown тег
-    # Заменяем на среднюю точку (·) — визуально схожий безопасный символ
-    return text.replace('*', '·').replace('`', "'")
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
 class TelegramNotifier:
@@ -181,6 +179,8 @@ class TelegramNotifier:
 
     def _format_block_catalog_report(self, report: dict) -> str:
         """Форматировать отчёт об изменениях каталога блоков"""
+        import json as _json
+
         new_blocks = report.get('new_blocks', [])
         removed_blocks = report.get('removed_blocks', [])
         changed_blocks = report.get('changed_blocks', [])
@@ -189,59 +189,117 @@ class TelegramNotifier:
         parts.append("🧱 ИЗМЕНЕНИЯ В КАТАЛОГЕ БЛОКОВ TILDA")
         parts.append("=" * 40)
 
-        # 1. Visibility changes (testers→"") — самый важный
-        visibility_releases = []
+        # 1. Блоки вышли из беты (testers → '')
+        released = []
+        # 2. Блоки стали публичными напрямую (team → '')
+        team_to_public = []
+        # 3. Блоки стали бета (team → testers или '' → testers)
+        became_beta = []
+        # 4. Прочие смены видимости
+        other_visibility = []
+
         for item in changed_blocks:
             for ch in item.get('changes', []):
-                if ch.get('change_type') == 'visibility_change' and ch.get('old_value') == 'testers' and ch.get('new_value') == '':
-                    bd = item['block_data']
-                    entry = f"  РЕЛИЗ: {bd['cod']} — {bd['title']}"
-                    if ch.get('llm_analysis'):
-                        try:
-                            import json
-                            analysis = json.loads(ch['llm_analysis'])
-                            summary = analysis.get('summary', '')
-                            if summary:
-                                entry += f"\n    {summary[:150]}"
-                        except Exception:
-                            pass
-                    visibility_releases.append(entry)
+                if ch.get('change_type') != 'visibility_change':
+                    continue
+                bd = item['block_data']
+                old_v = ch.get('old_value', '')
+                new_v = ch.get('new_value', '')
 
-        if visibility_releases:
+                def _llm_summary(ch):
+                    raw = ch.get('llm_analysis')
+                    if not raw:
+                        return ''
+                    try:
+                        analysis = _json.loads(raw)
+                        return analysis.get('summary', '')[:150]
+                    except Exception:
+                        return ''
+
+                entry = f"  {bd['cod']} — {bd['title']}"
+                summary = _llm_summary(ch)
+                if summary:
+                    entry += f"\n    {summary}"
+
+                if old_v == 'testers' and new_v == '':
+                    released.append(entry)
+                elif old_v == 'team' and new_v == '':
+                    team_to_public.append(entry)
+                elif new_v == 'testers':
+                    became_beta.append(f"  {bd['cod']} — {bd['title']} ({old_v!r} → 'testers')")
+                else:
+                    other_visibility.append(f"  {bd['cod']}: видимость {old_v!r} → {new_v!r}")
+
+        if released:
             parts.append("")
-            parts.append(f"🎉 Блоки вышли из беты ({len(visibility_releases)}):")
-            parts.extend(visibility_releases)
+            parts.append(f"🎉 Блоки вышли из беты ({len(released)}):")
+            parts.extend(released)
 
-        # 2. Новые бета-блоки
+        if team_to_public:
+            parts.append("")
+            parts.append(f"🆕 Блоки стали публичными ({len(team_to_public)}):")
+            parts.extend(team_to_public)
+
+        if became_beta:
+            parts.append("")
+            parts.append(f"🧪 Блоки перешли в бету ({len(became_beta)}):")
+            parts.extend(became_beta[:10])
+
+        if other_visibility:
+            parts.append("")
+            parts.append(f"👁 Прочие смены видимости ({len(other_visibility)}):")
+            parts.extend(other_visibility[:10])
+
+        # 5. Новые бета-блоки
         beta_new = [b for b in new_blocks if b.get('whocansee') == 'testers']
         if beta_new:
             parts.append("")
             parts.append(f"🧪 Новые бета-блоки ({len(beta_new)}):")
             for b in beta_new[:10]:
-                parts.append(f"  {b['cod']} — {b['title']}")
+                entry = f"  {b['cod']} — {b['title']}"
+                summary = ''
+                if b.get('llm_analysis'):
+                    try:
+                        analysis = _json.loads(b['llm_analysis'])
+                        summary = analysis.get('summary', '')[:150]
+                    except Exception:
+                        pass
+                if summary:
+                    entry += f"\n    {summary}"
+                parts.append(entry)
 
-        # 3. Новые публичные блоки
-        public_new = [b for b in new_blocks if b.get('whocansee') != 'testers']
+        # 6. Новые публичные блоки (whocansee == '')
+        public_new = [b for b in new_blocks if b.get('whocansee') == '']
         if public_new:
             parts.append("")
             parts.append(f"🆕 Новые публичные блоки ({len(public_new)}):")
             for b in public_new[:10]:
-                parts.append(f"  {b['cod']} — {b['title']}")
+                entry = f"  {b['cod']} — {b['title']}"
+                summary = ''
+                if b.get('llm_analysis'):
+                    try:
+                        analysis = _json.loads(b['llm_analysis'])
+                        summary = analysis.get('summary', '')[:150]
+                    except Exception:
+                        pass
+                if summary:
+                    entry += f"\n    {summary}"
+                parts.append(entry)
 
-        # 4. Удалённые блоки
+        # 7. Удалённые блоки
         if removed_blocks:
             parts.append("")
             parts.append(f"🗑 Удалённые блоки ({len(removed_blocks)}):")
             for b in removed_blocks[:10]:
                 parts.append(f"  {b.get('cod', 'N/A')} — {b.get('title', 'N/A')}")
 
-        # 5. Прочие изменения полей (кратко)
+        # 8. Прочие изменения полей (кратко)
         other_changes = []
         for item in changed_blocks:
-            non_vis = [ch for ch in item.get('changes', []) if ch.get('change_type') == 'field_change']
-            if non_vis:
+            field_changes = [ch for ch in item.get('changes', []) if ch.get('change_type') == 'field_change']
+            if field_changes:
                 bd = item['block_data']
-                fields = [ch.get('field_name', '?') for ch in non_vis]
+                fields = [ch.get('field_name', '?') for ch in field_changes]
                 other_changes.append(f"  {bd['cod']}: изменены {', '.join(fields)}")
 
         if other_changes:
@@ -353,42 +411,44 @@ class TelegramNotifier:
         Returns:
             Отформатированное сообщение
         """
-        severity = announcement.get('severity', 'НЕЗНАЧИТЕЛЬНОЕ')
+        severity = escape_html(announcement.get('severity', 'НЕЗНАЧИТЕЛЬНОЕ'))
         priority_emoji = PRIORITY_EMOJI.get(announcement.get('priority', 'MEDIUM'), '⚪')
         category = announcement.get('category', 'unknown')
         category_emoji = CATEGORY_EMOJI.get(category, '📦')
-        
-        description = escape_markdown(announcement.get('description', 'Нет описания'))
-        user_impact = escape_markdown(announcement.get('user_impact', 'Не указано'))
-        recommendations = escape_markdown(announcement.get('recommendations', 'Действий не требуется'))
 
-        message = f"""🔔 *Обновление Tilda* | {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        title = escape_html(announcement.get('title', 'Без заголовка'))
+        description = escape_html(announcement.get('description', 'Нет описания'))
+        user_impact = escape_html(announcement.get('user_impact', 'Не указано'))
+        recommendations = escape_html(announcement.get('recommendations', 'Действий не требуется'))
+        url = escape_html(announcement.get('url', 'N/A'))
 
-{priority_emoji} *{severity}*
+        message = f"""🔔 <b>Обновление Tilda</b> | {datetime.now().strftime('%d.%m.%Y %H:%M')}
 
-{category_emoji} *{category.upper()}*
-• {announcement.get('title', 'Без заголовка')}
+{priority_emoji} <b>{severity}</b>
 
-📝 *Описание:*
+{category_emoji} <b>{escape_html(category.upper())}</b>
+• {title}
+
+📝 <b>Описание:</b>
 {description}
 
-👥 *Влияние:*
+👥 <b>Влияние:</b>
 {user_impact}
 
-💡 *Рекомендации:*
+💡 <b>Рекомендации:</b>
 {recommendations}
 
 ━━━━━━━━━━━━━━━━
-🔗 Файл: `{announcement.get('url', 'N/A')}`
+🔗 Файл: <code>{url}</code>
 """
 
         # Добавить тренд и фичу если есть
         trend = announcement.get('trend')
         feature = announcement.get('feature')
         if trend:
-            message += f"\n📈 *Тренд:* {escape_markdown(trend)}"
+            message += f"\n📈 <b>Тренд:</b> {escape_html(trend)}"
         if feature:
-            message += f"\n🎯 *Фича:* {escape_markdown(feature)}"
+            message += f"\n🎯 <b>Фича:</b> {escape_html(feature)}"
 
         return message
     
@@ -403,17 +463,17 @@ class TelegramNotifier:
         Returns:
             Отформатированное сообщение
         """
-        message = f"📋 *Дайджест Tilda* | {datetime.now().strftime('%d %B %Y')}\n\n"
+        message = f"📋 <b>Дайджест Tilda</b> | {datetime.now().strftime('%d %B %Y')}\n\n"
 
         # LLM-сводка дня (если доступна)
         if digest_analysis:
-            summary = escape_markdown(digest_analysis.get('summary', ''))
+            summary = escape_html(digest_analysis.get('summary', ''))
             if summary:
-                message += f"📈 *Сводка дня:*\n{summary}\n\n"
+                message += f"📈 <b>Сводка дня:</b>\n{summary}\n\n"
 
-            attention = escape_markdown(digest_analysis.get('attention') or '')
+            attention = escape_html(digest_analysis.get('attention') or '')
             if attention:
-                message += f"⚠️ *Обратить внимание:* {attention}\n\n"
+                message += f"⚠️ <b>Обратить внимание:</b> {attention}\n\n"
         else:
             # Fallback: механическая сводка по категориям
             message += self._build_category_summary(announcements)
@@ -435,18 +495,18 @@ class TelegramNotifier:
 
         # CRITICAL
         if by_priority['CRITICAL']:
-            message += f"🔴 *КРИТИЧЕСКИЕ* ({len(by_priority['CRITICAL'])})\n"
+            message += f"🔴 <b>КРИТИЧЕСКИЕ</b> ({len(by_priority['CRITICAL'])})\n"
             message += self._format_priority_group(by_priority['CRITICAL'], show_impact=True)
 
         # HIGH
         if by_priority['HIGH']:
-            message += f"🟡 *ВАЖНЫЕ* ({len(by_priority['HIGH'])})\n"
+            message += f"🟡 <b>ВАЖНЫЕ</b> ({len(by_priority['HIGH'])})\n"
             message += self._format_priority_group(by_priority['HIGH'], show_impact=False)
 
         # MEDIUM + LOW (кратко)
         minor = by_priority['MEDIUM'] + by_priority['LOW']
         if minor:
-            message += f"🟢 *НЕЗНАЧИТЕЛЬНЫЕ* ({len(minor)})\n"
+            message += f"🟢 <b>НЕЗНАЧИТЕЛЬНЫЕ</b> ({len(minor)})\n"
             # Группируем файлы через запятую
             filenames = []
             for ann in minor:
@@ -459,7 +519,7 @@ class TelegramNotifier:
 
         # Тренд (из LLM или из данных)
         if digest_analysis and digest_analysis.get('trend'):
-            message += f"\n📈 *Тренд:* {escape_markdown(digest_analysis['trend'])}\n"
+            message += f"\n📈 <b>Тренд:</b> {escape_html(digest_analysis['trend'])}\n"
 
         message += "\n━━━━━━━━━━━━━━━━\n"
         message += f"📊 Всего: {len(announcements)} изменений за 24ч\n"
@@ -487,12 +547,12 @@ class TelegramNotifier:
             for ann in cat_items:
                 title = ann.get('title', 'Без заголовка')
                 filename = title.split(' - ')[0] if ' - ' in title else title.split('/')[-1]
-                desc = escape_markdown(ann.get('description', ''))
-                result += f"  • {self._smart_truncate(filename, 40)}\n"
+                desc = escape_html(ann.get('description', ''))
+                result += f"  • {escape_html(self._smart_truncate(filename, 40))}\n"
                 if desc:
                     result += f"    {self._smart_truncate(desc, 120)}\n"
                 if show_impact and ann.get('user_impact'):
-                    impact = escape_markdown(ann['user_impact'])
+                    impact = escape_html(ann['user_impact'])
                     result += f"    👥 {self._smart_truncate(impact, 100)}\n"
             result += "\n"
         return result
@@ -525,7 +585,7 @@ class TelegramNotifier:
             category_emoji = CATEGORY_EMOJI.get(cat, '📦')
             parts.append(f"{category_emoji} {cat} ({count})")
 
-        return f"📈 *Обзор:* Изменения в {', '.join(parts)}\n\n"
+        return f"📈 <b>Обзор:</b> Изменения в {', '.join(parts)}\n\n"
 
     def _compress_digest(self, message: str) -> str:
         """Сжать дайджест если превышает лимит Telegram (4096 символов)"""
@@ -558,9 +618,9 @@ class TelegramNotifier:
         Returns:
             Отформатированное сообщение
         """
-        message = f"""🔍 *Discovery Mode Report* | {datetime.now().strftime('%d.%m.%Y')}
+        message = f"""🔍 <b>Discovery Mode Report</b> | {datetime.now().strftime('%d.%m.%Y')}
 
-Обнаружено новых файлов: *{len(discovered_files)}*
+Обнаружено новых файлов: <b>{len(discovered_files)}</b>
 
 """
 
@@ -575,11 +635,11 @@ class TelegramNotifier:
         # Вывод по категориям
         for category, files in sorted(by_category.items()):
             category_emoji = CATEGORY_EMOJI.get(category, '📦')
-            message += f"{category_emoji} *{category.upper()}* ({len(files)} файлов)\n"
-            
+            message += f"{category_emoji} <b>{category.upper()}</b> ({len(files)} файлов)\n"
+
             for file_info in files[:5]:  # Максимум 5 файлов на категорию
-                filename = file_info['url'].split('/')[-1]
-                message += f"  • `{filename}`\n"
+                filename = escape_html(file_info['url'].split('/')[-1])
+                message += f"  • <code>{filename}</code>\n"
             
             if len(files) > 5:
                 message += f"  ... и еще {len(files) - 5} файлов\n"
@@ -604,23 +664,23 @@ class TelegramNotifier:
         priority_emoji = PRIORITY_EMOJI.get(alert_data.get('priority', 'MEDIUM'), '⚪')
         category_emoji = CATEGORY_EMOJI.get(alert_data.get('category', 'unknown'), '📦')
         
-        message = f"""🆕 *НОВАЯ ВЕРСИЯ ОБНАРУЖЕНА*
+        message = f"""🆕 <b>НОВАЯ ВЕРСИЯ ОБНАРУЖЕНА</b>
 
-📦 Файл: `{alert_data['base_name']}`
-{category_emoji} Категория: *{alert_data.get('category', 'unknown').upper()}* ({priority_emoji} {alert_data.get('priority', 'MEDIUM')})
+📦 Файл: <code>{escape_html(alert_data['base_name'])}</code>
+{category_emoji} Категория: <b>{escape_html(alert_data.get('category', 'unknown').upper())}</b> ({priority_emoji} {alert_data.get('priority', 'MEDIUM')})
 
-Текущая версия: {alert_data.get('current_version', 'unknown')}
-Новая версия: *{alert_data['new_version']}* ✨
+Текущая версия: {escape_html(str(alert_data.get('current_version', 'unknown')))}
+Новая версия: <b>{escape_html(str(alert_data['new_version']))}</b> ✨
 
-⚙️ Статус миграции: {alert_data.get('migration_status', 'Автоматическая миграция запущена...')}
+⚙️ Статус миграции: {escape_html(alert_data.get('migration_status', 'Автоматическая миграция запущена...'))}
 ⏱ Обнаружено: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 ━━━━━━━━━━━━━━━━
 🔗 Старый URL:
-`{alert_data.get('current_url', 'N/A')}`
+<code>{escape_html(alert_data.get('current_url', 'N/A'))}</code>
 
 🔗 Новый URL:
-`{alert_data['new_url']}`
+<code>{escape_html(alert_data['new_url'])}</code>
 """
         return message
     
@@ -636,12 +696,12 @@ class TelegramNotifier:
         """
         category_emoji = CATEGORY_EMOJI.get(migration_data.get('category', 'unknown'), '📦')
         
-        message = f"""✅ *МИГРАЦИЯ ЗАВЕРШЕНА*
+        message = f"""✅ <b>МИГРАЦИЯ ЗАВЕРШЕНА</b>
 
-📦 Файл: `{migration_data['base_name']}`
-{category_emoji} Категория: *{migration_data.get('category', 'unknown').upper()}*
+📦 Файл: <code>{escape_html(migration_data['base_name'])}</code>
+{category_emoji} Категория: <b>{escape_html(migration_data.get('category', 'unknown').upper())}</b>
 
-{migration_data.get('old_version', 'unknown')} → *{migration_data['new_version']}*
+{escape_html(str(migration_data.get('old_version', 'unknown')))} → <b>{escape_html(str(migration_data['new_version']))}</b>
 
 ⏱ Время миграции: {migration_data.get('migration_time', 0):.2f}с
 ✅ Статус: Активна и отслеживается
@@ -663,14 +723,14 @@ class TelegramNotifier:
         """
         category_emoji = CATEGORY_EMOJI.get(migration_data.get('category', 'unknown'), '📦')
         
-        message = f"""❌ *МИГРАЦИЯ НЕ УДАЛАСЬ*
+        message = f"""❌ <b>МИГРАЦИЯ НЕ УДАЛАСЬ</b>
 
-📦 Файл: `{migration_data['base_name']}`
-{category_emoji} Категория: *{migration_data.get('category', 'unknown').upper()}*
+📦 Файл: <code>{escape_html(migration_data['base_name'])}</code>
+{category_emoji} Категория: <b>{escape_html(migration_data.get('category', 'unknown').upper())}</b>
 
-{migration_data.get('old_version', 'unknown')} → {migration_data['new_version']}
+{escape_html(str(migration_data.get('old_version', 'unknown')))} → {escape_html(str(migration_data['new_version']))}
 
-❌ Ошибка: {escape_markdown(migration_data.get('error', 'Unknown error'))}
+❌ Ошибка: {escape_html(migration_data.get('error', 'Unknown error'))}
 🔙 Действие: Откат к предыдущей версии
 
 ━━━━━━━━━━━━━━━━
@@ -691,15 +751,15 @@ class TelegramNotifier:
         priority_emoji = PRIORITY_EMOJI.get(file_data.get('priority', 'MEDIUM'), '⚪')
         category_emoji = CATEGORY_EMOJI.get(file_data.get('category', 'unknown'), '📦')
         
-        message = f"""⚠️ *КРИТИЧЕСКАЯ ОШИБКА 404*
+        message = f"""⚠️ <b>КРИТИЧЕСКАЯ ОШИБКА 404</b>
 
-📦 Файл: `{file_data['base_name']}`
-{category_emoji} Категория: *{file_data.get('category', 'unknown').upper()}* ({priority_emoji} {file_data.get('priority', 'MEDIUM')})
+📦 Файл: <code>{escape_html(file_data['base_name'])}</code>
+{category_emoji} Категория: <b>{escape_html(file_data.get('category', 'unknown').upper())}</b> ({priority_emoji} {file_data.get('priority', 'MEDIUM')})
 
 🔗 URL:
-`{file_data['url']}`
+<code>{escape_html(file_data['url'])}</code>
 
-⚠️ Последовательных 404: *{file_data.get('consecutive_count', 0)}*
+⚠️ Последовательных 404: <b>{file_data.get('consecutive_count', 0)}</b>
 🔍 Действие: Запущен Discovery Mode для поиска замены
 
 ⏱ Время: {datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -709,7 +769,7 @@ class TelegramNotifier:
 """
         return message
     
-    def _send_message(self, message: str, parse_mode: str = "Markdown", thread_id: int = None) -> bool:
+    def _send_message(self, message: str, parse_mode: str = "HTML", thread_id: int = None) -> bool:
         """
         Отправить сообщение через Telegram Bot API
 

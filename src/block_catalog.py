@@ -178,7 +178,12 @@ class BlockCatalogMonitor:
                         change_data['llm_analysis'] = llm_text
 
                     db.save_block_change(change_data)
-                    result['new_blocks'].append(block_data)
+
+                    # Включаем llm_analysis в запись для отчёта
+                    new_block_entry = dict(block_data)
+                    if llm_text:
+                        new_block_entry['llm_analysis'] = llm_text
+                    result['new_blocks'].append(new_block_entry)
                     result['changes_saved'] += 1
 
                     visibility = "бета" if block_data.get('whocansee') == 'testers' else "публичный"
