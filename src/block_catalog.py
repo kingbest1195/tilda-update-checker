@@ -130,6 +130,7 @@ class BlockCatalogMonitor:
             'removed_blocks': [],
             'changed_blocks': [],
             'changes_saved': 0,
+            'change_ids': [],
         }
 
         # 1. Загрузить каталог
@@ -177,7 +178,8 @@ class BlockCatalogMonitor:
                     if llm_text:
                         change_data['llm_analysis'] = llm_text
 
-                    db.save_block_change(change_data)
+                    saved = db.save_block_change(change_data)
+                    result['change_ids'].append(saved.id)
 
                     # Включаем llm_analysis в запись для отчёта
                     new_block_entry = dict(block_data)
@@ -198,7 +200,8 @@ class BlockCatalogMonitor:
                     changes_for_block = self._detect_field_changes(existing, block_data)
 
                     for change in changes_for_block:
-                        db.save_block_change(change)
+                        saved = db.save_block_change(change)
+                        result['change_ids'].append(saved.id)
                         result['changes_saved'] += 1
 
                     if changes_for_block:
@@ -230,7 +233,8 @@ class BlockCatalogMonitor:
                         'change_type': 'removed_block',
                         'old_value': existing.title,
                     }
-                    db.save_block_change(change_data)
+                    saved = db.save_block_change(change_data)
+                    result['change_ids'].append(saved.id)
                     result['removed_blocks'].append({
                         'block_id': block_id,
                         'cod': existing.cod,

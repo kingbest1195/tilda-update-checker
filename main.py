@@ -621,8 +621,12 @@ def check_block_catalog():
                 success = notifier.send_block_catalog_report(result)
                 if success:
                     logger.info("✅ Отчёт о блоках отправлен в Telegram")
+                    for change_id in result.get('change_ids', []):
+                        db.mark_block_notification_sent(change_id, success=True)
                 else:
                     logger.error(f"❌ Ошибка отправки отчёта о блоках: {notifier.last_error}")
+                    for change_id in result.get('change_ids', []):
+                        db.mark_block_notification_sent(change_id, success=False, error=notifier.last_error)
 
         logger.info("="*80 + "\n")
 

@@ -250,41 +250,46 @@ class TelegramNotifier:
             parts.append(f"👁 Прочие смены видимости ({len(other_visibility)}):")
             parts.extend(other_visibility[:10])
 
+        def _block_entry(b):
+            entry = f"  {b['cod']} — {b['title']}"
+            if b.get('llm_analysis'):
+                try:
+                    analysis = _json.loads(b['llm_analysis'])
+                    summary = analysis.get('summary', '')[:150]
+                    if summary:
+                        entry += f"\n    {summary}"
+                except Exception:
+                    pass
+            return entry
+
         # 5. Новые бета-блоки
         beta_new = [b for b in new_blocks if b.get('whocansee') == 'testers']
         if beta_new:
             parts.append("")
             parts.append(f"🧪 Новые бета-блоки ({len(beta_new)}):")
-            for b in beta_new[:10]:
-                entry = f"  {b['cod']} — {b['title']}"
-                summary = ''
-                if b.get('llm_analysis'):
-                    try:
-                        analysis = _json.loads(b['llm_analysis'])
-                        summary = analysis.get('summary', '')[:150]
-                    except Exception:
-                        pass
-                if summary:
-                    entry += f"\n    {summary}"
-                parts.append(entry)
+            parts.extend(_block_entry(b) for b in beta_new[:10])
+
+        # 5.5. Новые team-блоки (внутренние, whocansee == 'team')
+        team_new = [b for b in new_blocks if b.get('whocansee') == 'team']
+        if team_new:
+            parts.append("")
+            parts.append(f"👥 Новые внутренние блоки (team) ({len(team_new)}):")
+            parts.extend(_block_entry(b) for b in team_new[:10])
 
         # 6. Новые публичные блоки (whocansee == '')
         public_new = [b for b in new_blocks if b.get('whocansee') == '']
         if public_new:
             parts.append("")
             parts.append(f"🆕 Новые публичные блоки ({len(public_new)}):")
-            for b in public_new[:10]:
-                entry = f"  {b['cod']} — {b['title']}"
-                summary = ''
-                if b.get('llm_analysis'):
-                    try:
-                        analysis = _json.loads(b['llm_analysis'])
-                        summary = analysis.get('summary', '')[:150]
-                    except Exception:
-                        pass
-                if summary:
-                    entry += f"\n    {summary}"
-                parts.append(entry)
+            parts.extend(_block_entry(b) for b in public_new[:10])
+
+        # 6.5. Прочие новые блоки (неизвестная видимость)
+        known_vis = {'testers', 'team', ''}
+        other_new = [b for b in new_blocks if b.get('whocansee') not in known_vis]
+        if other_new:
+            parts.append("")
+            parts.append(f"🆕 Новые блоки ({len(other_new)}):")
+            parts.extend(_block_entry(b) for b in other_new[:10])
 
         # 7. Удалённые блоки
         if removed_blocks:
