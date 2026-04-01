@@ -172,7 +172,12 @@ class TelegramNotifier:
 
         try:
             message = self._format_block_catalog_report(report)
-            return self._send_message(message, parse_mode=None, thread_id=self.discovery_thread_id)
+            chunks = self._split_long_message(message)
+            success = False
+            for chunk in chunks:
+                if self._send_message(chunk, parse_mode=None, thread_id=self.discovery_thread_id):
+                    success = True
+            return success
         except Exception as e:
             logger.error(f"Ошибка при отправке отчёта о блоках: {e}", exc_info=True)
             return False
@@ -318,13 +323,7 @@ class TelegramNotifier:
         total = len(new_blocks) + len(removed_blocks) + len(changed_blocks)
         parts.append(f"Итого: {total} изменений в каталоге")
 
-        message = "\n".join(parts)
-
-        # Обрезка если > 4000
-        if len(message) > 4000:
-            message = message[:3950] + "\n\n... (сообщение обрезано)"
-
-        return message
+        return "\n".join(parts)
 
     def send_version_alert(self, alert_data: Dict) -> bool:
         """
@@ -774,6 +773,31 @@ class TelegramNotifier:
 """
         return message
     
+    def _split_long_message(self, message: str, max_len: int = 4000) -> list:
+        """Разбить длинное сообщение на части по естественным границам (пустые строки)."""
+        if len(message) <= max_len:
+            return [message]
+
+        lines = message.split('\n')
+        chunks = []
+        current_lines = []
+        current_len = 0
+
+        for line in lines:
+            line_len = len(line) + 1  # +1 за символ переноса строки
+            if current_len + line_len > max_len and current_lines:
+                chunks.append('\n'.join(current_lines))
+                current_lines = [line]
+                current_len = line_len
+            else:
+                current_lines.append(line)
+                current_len += line_len
+
+        if current_lines:
+            chunks.append('\n'.join(current_lines))
+
+        return chunks
+
     def _send_message(self, message: str, parse_mode: str = "HTML", thread_id: int = None) -> bool:
         """
         Отправить сообщение через Telegram Bot API

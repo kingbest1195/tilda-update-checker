@@ -592,9 +592,11 @@ class LLMAnalyzer:
                 response = self.client.chat.completions.create(**api_kwargs)
 
                 content = response.choices[0].message.content
+                finish_reason = response.choices[0].finish_reason if response.choices else 'N/A'
                 if not content or not content.strip():
                     logger.warning(
-                        f"Batch-анализ для {category}: OpenAI вернул пустой ответ, пропускаем"
+                        f"Batch-анализ для {category}: OpenAI вернул пустой ответ, пропускаем "
+                        f"(finish_reason={finish_reason!r})"
                     )
                     continue
                 data = json.loads(content)
